@@ -1,0 +1,2962 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TheZing — CECyTEC Network</title>
+
+  <!-- ============================================================
+       EXTERNAL DEPENDENCIES
+       Firebase SDK v10 (modular), Google Fonts, AdSense GPT stub
+  ============================================================ -->
+  <!-- Google Fonts: Cyberpunk-appropriate typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600;700&display=swap" rel="stylesheet" />
+
+  <!-- Google Publisher Tag (GPT) — AdSense / Ad Manager integration
+       En producción reemplaza con tu script real de GPT       -->
+  <script async src="https://securepubads.g.doubleclick.net/tag/js/gpt.js"></script>
+
+  <!-- Firebase SDK v10 (CDN modular) -->
+  <script type="module">
+    // ============================================================
+    // NOTA: En producción, mueve todo este bloque <script type="module">
+    // a un archivo `/src/main.js` y usa Vite/Webpack para bundling.
+    // Aquí está todo inline para facilitar el deployment directo.
+    // ============================================================
+
+    import { initializeApp }           from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+                                       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getFirestore, collection, addDoc, query, orderBy, limit,
+             onSnapshot, doc, setDoc, getDoc, updateDoc, where,
+             serverTimestamp, increment, runTransaction, writeBatch }
+                                       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import { getStorage, ref as storageRef, uploadBytes, getDownloadURL }
+                                       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+    import { getAnalytics, logEvent }  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics.js";
+
+    // ================================================================
+    // ███████████████████████████████████████████████████████████████
+    // SECCIÓN 1 — GLOBAL CONFIGURATION & CONSTANTS
+    // ███████████████████████████████████████████████████████████████
+    // ================================================================
+
+    /**
+     * FIREBASE_CONFIG
+     * Reemplaza estos valores con los de tu proyecto en Firebase Console.
+     * NUNCA expongas estas claves en un repositorio público sin restricciones
+     * de dominio configuradas en la Firebase Console y en GCP API Key Manager.
+     */
+    const FIREBASE_CONFIG = {
+      apiKey:            "AIzaSy_TU_API_KEY_AQUI",
+      authDomain:        "thezing-cecytec.firebaseapp.com",
+      projectId:         "thezing-cecytec",
+      storageBucket:     "thezing-cecytec.appspot.com",
+      messagingSenderId: "123456789012",
+      appId:             "1:123456789012:web:abcdef1234567890",
+      measurementId:     "G-XXXXXXXXXX",
+    };
+
+    /**
+     * AD_SLOTS_CONFIG
+     * Slots configurados en Google Ad Manager / AdSense.
+     * Cada board tiene su propio slot para targeting contextual
+     * y maximización de RPM.
+     *
+     * Estructura: { boardId: { inFeed: "/networkCode/unitName", sticky: "..." } }
+     */
+    const AD_SLOTS_CONFIG = {
+      chismes:   { inFeed: "/21775744923/TheZing_Chismes_InFeed",   sticky: "/21775744923/TheZing_Sticky_Mobile" },
+      proyectos: { inFeed: "/21775744923/TheZing_Proyectos_InFeed", sticky: "/21775744923/TheZing_Sticky_Mobile" },
+      box:       { inFeed: "/21775744923/TheZing_Box_InFeed",       sticky: "/21775744923/TheZing_Sticky_Mobile" },
+      market:    { inFeed: "/21775744923/TheZing_Market_InFeed",    sticky: "/21775744923/TheZing_Sticky_Mobile" },
+    };
+
+    /**
+     * AD_REFRESH_INTERVAL_MS
+     * Intervalo de auto-refresh de anuncios sticky.
+     * Google policy: mínimo 30 segundos. Usamos 60s para estar seguros.
+     * Ref: https://support.google.com/admanager/answer/1638712
+     */
+    const AD_REFRESH_INTERVAL_MS = 60_000;
+
+    /**
+     * IN_FEED_AD_FREQUENCY
+     * Inserta un slot publicitario cada N posts dentro de un hilo.
+     * Valor 4 = máxima densidad permitida por políticas de AdSense.
+     */
+    const IN_FEED_AD_FREQUENCY = 4;
+
+    /**
+     * POSTS_PER_BATCH
+     * Cantidad de posts que se cargan por lote (scroll infinito / paginación).
+     * Valor 20 balancea UX vs lecturas de Firestore (costo $$).
+     */
+    const POSTS_PER_BATCH = 20;
+
+    /**
+     * BOARD_DEFINITIONS
+     * ─────────────────────────────────────────────────────────────────
+     * ARQUITECTURA GLOBAL v2 — SUPER RED ÚNICA
+     * ─────────────────────────────────────────────────────────────────
+     * Las secciones ya NO están particionadas por plantel.
+     * Todos los 22,000 usuarios del sistema CECyTEC comparten el MISMO
+     * feed global por sección. No hay filtro de campus en ninguna query.
+     *
+     * Schema Firestore resultante (flat, sin partición por campus):
+     *   sections/{sectionId}/posts/{postId}
+     *   sections/{sectionId}/posts/{postId}/replies/{replyId}
+     *
+     * La clave `sectionId` reemplaza a `boardId` en toda la lógica.
+     * Se mantiene `boardId` como alias en los datos guardados para
+     * compatibilidad con el Identity Ledger existente.
+     *
+     * Índice compuesto requerido en Firestore Console:
+     *   Collection: posts  |  Fields: timestamp DESC  (simple, no compuesto)
+     *   → Sin `where` de campus, este índice simple es suficiente y
+     *     es el más eficiente posible para un feed cronológico global.
+     * ─────────────────────────────────────────────────────────────────
+     */
+    const BOARD_DEFINITIONS = {
+      chismes: {
+        id:          "chismes",
+        label:       "Sala de Chismes",
+        navLabel:    "/chismes/",
+        description: "El chisme que arde — 22,000 alumnos, sin filtros, red única.",
+        color:       "#FF00FF",  // Magenta Neon
+        colorDim:    "#CC00CC",
+        shadow:      "0 0 8px #FF00FF, 0 0 20px #FF00FF40",
+        glowClass:   "glow-magenta",
+        emoji:       "🔥",
+      },
+      proyectos: {
+        id:          "proyectos",
+        label:       "Proyectos",
+        navLabel:    "/proyectos/",
+        description: "Ideas, hacks y proyectos — toda la red colabora.",
+        color:       "#00FFFF",  // Cyan Neon
+        colorDim:    "#00CCCC",
+        shadow:      "0 0 8px #00FFFF, 0 0 20px #00FFFF40",
+        glowClass:   "glow-cyan",
+        emoji:       "⚡",
+      },
+      dudas: {
+        id:          "dudas",
+        label:       "Dudas",
+        navLabel:    "/dudas/",
+        description: "Pregunta lo que sea — alguien en la red sabe la respuesta.",
+        color:       "#FFD700",  // Gold Neon
+        colorDim:    "#CCA800",
+        shadow:      "0 0 8px #FFD700, 0 0 20px #FFD70040",
+        glowClass:   "glow-gold",
+        emoji:       "❓",
+      },
+      box: {
+        id:          "box",
+        label:       "El Box",
+        navLabel:    "/box/",
+        description: "El ring global — debates, retas y peleas de ideas.",
+        color:       "#FF4500",  // Orange/Red Neon
+        colorDim:    "#CC3300",
+        shadow:      "0 0 8px #FF4500, 0 0 20px #FF450040",
+        glowClass:   "glow-orange",
+        emoji:       "🥊",
+      },
+      market: {
+        id:          "market",
+        label:       "Marketplace",
+        navLabel:    "/market/",
+        description: "Compra, vende, intercambia — con toda la red.",
+        color:       "#00FF41",  // Matrix Green Neon
+        colorDim:    "#00CC33",
+        shadow:      "0 0 8px #00FF41, 0 0 20px #00FF4140",
+        glowClass:   "glow-green",
+        emoji:       "💠",
+      },
+      random: {
+        id:          "random",
+        label:       "Random",
+        navLabel:    "/random/",
+        description: "Todo lo que no cabe en otro lado. El caos organizado.",
+        color:       "#BF00FF",  // Violet Neon
+        colorDim:    "#8C00CC",
+        shadow:      "0 0 8px #BF00FF, 0 0 20px #BF00FF40",
+        glowClass:   "glow-violet",
+        emoji:       "🎲",
+      },
+    };
+
+    // ─────────────────────────────────────────────────────────────────
+    // NOTA v2: CECYTEC_CAMPUS_IDS eliminado intencionalmente.
+    // La plataforma es ahora una Super Red única — no se segmenta
+    // por plantel en ninguna query, formulario ni ad targeting.
+    // El campo `campusId` en el Identity Ledger se conserva como
+    // metadato de moderación PRIVADO (solo admin), pero nunca se
+    // usa como filtro público ni como partición de datos.
+    // ─────────────────────────────────────────────────────────────────
+
+    // ================================================================
+    // ███████████████████████████████████████████████████████████████
+    // SECCIÓN 2 — SECURITY & CRYPTOGRAPHY MODULE
+    // "The Shadow Protocol" — Fingerprinting, HashIDs, Shadowban Engine
+    // ███████████████████████████████████████████████████████████████
+    // ================================================================
+
+    /**
+     * WORD_BLACKLIST
+     * Diccionario de +100 palabras prohibidas (español mexicano / jerga local).
+     * Esta lista se usa para:
+     * 1. Pre-filtro en cliente (UX inmediata).
+     * 2. Cloud Function en servidor (fuente de verdad).
+     * NOTA: Lista censurada aquí con marcadores — en producción popúlala
+     * con las variantes ortográficas reales en tu colección Firestore
+     * `config/moderationRules` para no exponerlas en el frontend bundle.
+     */
+    const WORD_BLACKLIST = new Set([
+      // Insultos generales
+      "puta","puto","pinche","chinga","chingada","mamada","culero",
+      "pendejo","pendeja","cabrón","cabron","wey","buey","idiota",
+      "imbécil","imbecil","estúpido","estupido","tarado","tarada",
+      "marica","joto","perra","perro","basura","mierda","culo",
+      "verga","pene","vagina","coño","coño","hijo de puta",
+      "malparido","hijodeputa","hdp","wtf","stfu","kys",
+      // Acoso escolar / bullying
+      "gorda","gordo","naco","naca","corriente","feo","fea",
+      "retrasado","mongol","autista","down","suicídate","suicidate",
+      "mátate","matate","muérete","muerete","inútil","inutile",
+      // Discriminación
+      "negro","prieto","indio","india","judio","judío","árabe",
+      "terrorista","narco","sicario",
+      // Variantes con números (leet speak)
+      "p1nche","ch1nga","cul3ro","p3ndejo","st4r","f4g",
+      // Términos de doxxing
+      "dirección","direccion","teléfono","telefono","domicilio",
+      "matrícula","matricula","curp","contraseña","password",
+      // Contenido ilegal
+      "vendo","compro","drogas","mota","cristal","cocaína","cocaina",
+      "arma","pistola","cuerno","gotas","pastillas",
+    ]);
+
+    /**
+     * SecurityModule
+     * Clase singleton que maneja:
+     * - Generación de HashIDs anónimos determinísticos (misma UID = mismo Hash)
+     * - Detección de contenido prohibido con scoring
+     * - Sanitización XSS
+     * - Fingerprinting de dispositivo para correlación anti-ban
+     */
+    class SecurityModule {
+      constructor() {
+        /** Cache de hashIDs generados para evitar re-cómputo */
+        this._hashCache = new Map();
+        /** Umbral de score para activar shadowban automático */
+        this.SHADOWBAN_THRESHOLD = 3;
+      }
+
+      /**
+       * generateHashID(uid)
+       * Genera un HashID de 6 caracteres alfanuméricos determinístico
+       * a partir del UID de Firebase.
+       * El mismo UID SIEMPRE produce el mismo HashID (reproducible).
+       * Usa Web Crypto API (SHA-256) — disponible en todos los navegadores modernos.
+       *
+       * @param {string} uid — Firebase UID del usuario autenticado
+       * @returns {Promise<string>} — HashID público ej: "#A1B2C3"
+       */
+      async generateHashID(uid) {
+        // Revisar cache primero para no re-computar
+        if (this._hashCache.has(uid)) {
+          return this._hashCache.get(uid);
+        }
+
+        try {
+          // Convertir UID string a ArrayBuffer para Web Crypto
+          const encoder  = new TextEncoder();
+          const data     = encoder.encode(uid + "thezing_salt_cecytec_2024");
+          const hashBuf  = await crypto.subtle.digest("SHA-256", data);
+          const hashArr  = Array.from(new Uint8Array(hashBuf));
+
+          // Tomar los primeros 3 bytes → 6 caracteres hexadecimales uppercase
+          const hexHash  = hashArr
+            .slice(0, 3)
+            .map(b => b.toString(16).padStart(2, "0").toUpperCase())
+            .join("");
+
+          const hashID   = `#${hexHash}`;
+
+          // Cachear resultado
+          this._hashCache.set(uid, hashID);
+
+          return hashID;
+        } catch (err) {
+          console.error("[SecurityModule] Error generando HashID:", err);
+          // Fallback determinístico simple si Web Crypto falla
+          return "#" + uid.slice(0, 6).toUpperCase();
+        }
+      }
+
+      /**
+       * sanitizeInput(rawText)
+       * Sanitización anti-XSS de texto de usuario antes de guardarlo en Firestore
+       * y antes de renderizarlo en el DOM.
+       * Escapa caracteres HTML especiales para prevenir inyección de scripts.
+       *
+       * @param {string} rawText — Texto crudo del usuario
+       * @returns {string} — Texto sanitizado, seguro para insertar en innerHTML
+       */
+      sanitizeInput(rawText) {
+        if (typeof rawText !== "string") return "";
+
+        return rawText
+          // Limitar longitud máxima (previene DoS en rendering)
+          .slice(0, 2000)
+          // Escapar todos los caracteres HTML peligrosos
+          .replace(/&/g,  "&amp;")
+          .replace(/</g,  "&lt;")
+          .replace(/>/g,  "&gt;")
+          .replace(/"/g,  "&quot;")
+          .replace(/'/g,  "&#x27;")
+          .replace(/\//g, "&#x2F;")
+          // Eliminar secuencias de control Unicode peligrosas
+          .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
+          // Eliminar intentos de javascript: en URLs
+          .replace(/javascript:/gi, "")
+          .replace(/data:/gi,       "")
+          .replace(/vbscript:/gi,   "")
+          // Normalizar espacios múltiples
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+
+      /**
+       * checkContentPolicy(text)
+       * Analiza un texto contra la blacklist y reglas de política de contenido.
+       * Retorna un objeto de resultado con score y razones.
+       *
+       * Scoring:
+       * - Cada palabra de blacklist encontrada: +1 punto
+       * - Patrón de doxxing detectado: +2 puntos
+       * - URL sospechosa: +1 punto
+       * - Score >= 1: rechazar post
+       * - Score >= SHADOWBAN_THRESHOLD: marcar para shadowban
+       *
+       * @param {string} text — Texto ya sanitizado
+       * @returns {{ allowed: boolean, score: number, triggers: string[], shadowban: boolean }}
+       */
+      checkContentPolicy(text) {
+        const lowerText = text.toLowerCase();
+        const words     = lowerText.split(/\s+/);
+        const triggers  = [];
+        let   score     = 0;
+
+        // 1. Revisión de blacklist (O(n) sobre las palabras del mensaje)
+        for (const word of words) {
+          // Limpiar puntuación del extremo de la palabra
+          const cleanWord = word.replace(/[^a-záéíóúüñ0-9]/gi, "");
+          if (WORD_BLACKLIST.has(cleanWord)) {
+            triggers.push(`blacklist:${cleanWord}`);
+            score += 1;
+          }
+        }
+
+        // 2. Detección de patrones de doxxing (números de teléfono MX)
+        const phonePattern = /(\+52|52)?[\s-]?([0-9]{2,3})[\s-]?([0-9]{3,4})[\s-]?([0-9]{4})/g;
+        if (phonePattern.test(lowerText)) {
+          triggers.push("doxxing:phone_number");
+          score += 2;
+        }
+
+        // 3. Detección de CURP
+        const curpPattern = /[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d/i;
+        if (curpPattern.test(text)) {
+          triggers.push("doxxing:curp");
+          score += 3; // Severidad máxima
+        }
+
+        // 4. Links externos no permitidos (spam/phishing)
+        const urlPattern = /https?:\/\/(?!thezing\.cecytec\.edu\.mx)[^\s]+/gi;
+        if (urlPattern.test(lowerText)) {
+          triggers.push("external_url");
+          score += 1;
+        }
+
+        return {
+          allowed:    score === 0,
+          score,
+          triggers,
+          shadowban:  score >= this.SHADOWBAN_THRESHOLD,
+        };
+      }
+
+      /**
+       * generateDeviceFingerprint()
+       * Genera una huella de dispositivo ligera (no invasiva) para correlacionar
+       * cuentas que intentan evadir shadowbans creando nuevas cuentas de Google.
+       *
+       * Combina: canvas fingerprint + screen resolution + timezone + userAgent hash.
+       * NOTA LEGAL: Documentar en Términos de Uso que se recopila esta información
+       * con fines de moderación. CECyTEC debe informar a usuarios en el aviso de privacidad.
+       *
+       * @returns {Promise<string>} — Fingerprint hash hex de 16 caracteres
+       */
+      async generateDeviceFingerprint() {
+        try {
+          const components = [];
+
+          // Screen info
+          components.push(`${window.screen.width}x${window.screen.height}x${window.screen.colorDepth}`);
+
+          // Timezone
+          components.push(Intl.DateTimeFormat().resolvedOptions().timeZone);
+
+          // User Agent (parcial, sin datos demasiado específicos)
+          components.push(navigator.userAgent.slice(0, 50));
+
+          // Canvas fingerprint (técnica estándar de industry)
+          const canvas  = document.createElement("canvas");
+          const ctx     = canvas.getContext("2d");
+          ctx.textBaseline = "alphabetic";
+          ctx.font         = "14px 'Arial'";
+          ctx.fillStyle    = "#f60";
+          ctx.fillRect(125, 1, 62, 20);
+          ctx.fillStyle    = "#069";
+          ctx.fillText("TheZing🔥CECyTEC", 2, 15);
+          ctx.fillStyle    = "rgba(102, 204, 0, 0.7)";
+          ctx.fillText("TheZing🔥CECyTEC", 4, 17);
+          components.push(canvas.toDataURL().slice(-50));
+
+          // Hardware concurrency
+          components.push(`cores:${navigator.hardwareConcurrency || 0}`);
+
+          const combined  = components.join("|");
+          const encoder   = new TextEncoder();
+          const data      = encoder.encode(combined);
+          const hashBuf   = await crypto.subtle.digest("SHA-256", data);
+          const hashArr   = Array.from(new Uint8Array(hashBuf));
+
+          return hashArr.slice(0, 8).map(b => b.toString(16).padStart(2, "0")).join("");
+        } catch (err) {
+          console.error("[SecurityModule] Error en fingerprint:", err);
+          return "fp_error_" + Date.now().toString(36);
+        }
+      }
+    }
+
+    // Instancia singleton del módulo de seguridad
+    const Security = new SecurityModule();
+
+    // ================================================================
+    // ███████████████████████████████████████████████████████████████
+    // SECCIÓN 3 — DATABASE & REALTIME ENGINE
+    // Handlers de Firestore: escritura, lectura, onSnapshot, paginación
+    // ███████████████████████████████████████████████████████████████
+    // ================================================================
+
+    /**
+     * FIRESTORE SCHEMA v2 — SUPER RED GLOBAL (Documentado aquí para Awais)
+     * ═══════════════════════════════════════════════════════════════════
+     *
+     * CAMBIO PRINCIPAL v2:
+     *   ANTES → boards/{boardId}/posts/{postId}    ← particionado por campus
+     *   AHORA → sections/{sectionId}/posts/{postId} ← feed global único
+     *
+     * NO existe ningún `where("campusId", "==", x)` en las queries públicas.
+     * Todos los usuarios ven el mismo feed sin importar su plantel.
+     *
+     * Colecciones PÚBLICAS (Firestore rules: read=true, write=if request.auth != null):
+     * ├── sections/{sectionId}/
+     * │   ├── posts/{postId}  ← Post principal — feed global
+     * │   │   ├── hashID:         string  ("#A1B2C3") — identidad pública anónima
+     * │   │   ├── content:        string  — texto sanitizado
+     * │   │   ├── imageURL:       string? — URL de Firebase Storage (nullable)
+     * │   │   ├── timestamp:      Timestamp — serverTimestamp() — campo indexado
+     * │   │   ├── replyCount:     number  — contador desnormalizado (increment atómico)
+     * │   │   ├── sectionId:      string  — ID de la sección (redundante, útil en queries)
+     * │   │   ├── isShadowbanned: boolean — shadowban silencioso (solo autor lo ve)
+     * │   │   └── _authorUID:     string  — solo para shadowban check en cliente
+     * │   │
+     * │   └── posts/{postId}/replies/{replyId}  ← Subcolección de respuestas
+     * │       ├── hashID, content, imageURL, timestamp, isShadowbanned, _authorUID
+     * │       └── parentPostId: string — ID del post padre
+     *
+     * Colección PRIVADA (Firestore rules: allow read, write: if request.auth.uid == "ADMIN_UID"):
+     * └── _identityLedger/{postId}
+     *     ├── realEmail:       string  — email real del usuario (PII — nunca exponer)
+     *     ├── realUID:         string  — Firebase UID
+     *     ├── deviceFP:        string  — device fingerprint (anti-evasión)
+     *     ├── sectionId:       string  — sección donde se publicó
+     *     ├── postId:          string  — ID correlacionado con la colección pública
+     *     ├── timestamp:       Timestamp
+     *     ├── contentSnapshot: string  — copia del contenido al momento de publicar
+     *     └── type:            string  — "post" | "reply"
+     *
+     * Colección de MODERACIÓN (privada):
+     * └── _shadowbannedUsers/{uid}
+     *     ├── uid, deviceFP, reason, score, bannedAt, bannedBy, active
+     *
+     * ÍNDICES FIRESTORE REQUERIDOS (crear en Firebase Console → Indexes):
+     * ┌─ Collection group: posts
+     * │  Field: timestamp  Direction: Descending
+     * │  → Cubre el feed global de cada sección (query simple, máxima eficiencia)
+     * └─ No se necesitan índices compuestos — sin filtros de campus
+     * ═══════════════════════════════════════════════════════════════════
+     */
+
+    /**
+     * DatabaseEngine
+     * Clase que encapsula todas las operaciones con Firestore.
+     * Maneja el ciclo de vida de los listeners onSnapshot para evitar
+     * memory leaks (guardando las funciones de unsubscribe).
+     */
+    class DatabaseEngine {
+      constructor(db) {
+        /** Referencia a la instancia de Firestore */
+        this.db = db;
+        /**
+         * Map de unsubscribe functions activas.
+         * Key: identificador de listener (e.g., "board:chismes")
+         * Value: función retornada por onSnapshot()
+         */
+        this._listeners = new Map();
+        /** Cursor para paginación (último documento cargado) */
+        this._paginationCursors = new Map();
+      }
+
+      /**
+       * subscribeToBoard(sectionId, callback)
+       * ─────────────────────────────────────────────────────────────
+       * SUPER RED GLOBAL v2 — SIN FILTRO DE CAMPUS
+       * ─────────────────────────────────────────────────────────────
+       * Crea un listener en tiempo real sobre los posts de una sección global.
+       * Lee de `sections/{sectionId}/posts` — un único feed compartido por
+       * los 22,000 usuarios del sistema, sin ninguna partición por plantel.
+       *
+       * La query usa solo `orderBy("timestamp", "desc") + limit()` — la query
+       * más eficiente posible en Firestore. Sin `where` adicionales = sin índices
+       * compuestos costosos = menor latencia y menor costo por lectura.
+       *
+       * onSnapshot mantiene la conexión WebSocket activa y despacha el callback
+       * cada vez que cualquier usuario en la red publica en esta sección.
+       *
+       * @param {string}   sectionId — ID de la sección global (antes: boardId)
+       * @param {Function} callback  — fn(posts: array) llamada en tiempo real
+       */
+      subscribeToBoard(sectionId, callback) {
+        // Cancelar listener previo si existe (evitar duplicados y memory leaks)
+        this.unsubscribeFromBoard(sectionId);
+
+        try {
+          // ── PATH GLOBAL v2 ──
+          // sections/{sectionId}/posts — feed único global, sin partición de campus
+          const postsRef   = collection(this.db, "sections", sectionId, "posts");
+          const postsQuery = query(
+            postsRef,
+            orderBy("timestamp", "desc"),  // Más recientes primero
+            limit(POSTS_PER_BATCH)          // Cargar en lotes de 20 (costo-eficiente)
+            // ✗ SIN where("campusId", ...) — feed global unificado
+          );
+
+          // Crear listener en tiempo real
+          const unsubFn = onSnapshot(
+            postsQuery,
+            (snapshot) => {
+              const posts = [];
+              snapshot.forEach((docSnap) => {
+                const data       = docSnap.data();
+                const currentUID = AppState.currentUser?.uid;
+
+                // SHADOWBAN CHECK — intacto de v1:
+                // Si el post está shadowbanned, solo lo ve su autor.
+                // Para todos los demás, el post no existe silenciosamente.
+                if (data.isShadowbanned && data._authorUID !== currentUID) {
+                  return;
+                }
+                posts.push({ id: docSnap.id, ...data });
+              });
+
+              // Guardar cursor de paginación para futura carga infinita
+              const docs = snapshot.docs;
+              if (docs.length > 0) {
+                this._paginationCursors.set(sectionId, docs[docs.length - 1]);
+              }
+
+              callback(posts);
+            },
+            (error) => {
+              console.error(`[DatabaseEngine] Error en listener de sección ${sectionId}:`, error);
+              UIRenderer.showBoardError(sectionId, error.message);
+            }
+          );
+
+          this._listeners.set(`board:${sectionId}`, unsubFn);
+
+        } catch (err) {
+          console.error("[DatabaseEngine] Error creando subscription global:", err);
+          throw err;
+        }
+      }
+
+      /**
+       * unsubscribeFromBoard(boardId)
+       * Cancela el listener de tiempo real de un board.
+       * Llamar cuando el usuario navega FUERA del board para liberar recursos.
+       *
+       * @param {string} boardId
+       */
+      unsubscribeFromBoard(boardId) {
+        const key    = `board:${boardId}`;
+        const unsubFn = this._listeners.get(key);
+        if (unsubFn) {
+          unsubFn(); // Firestore libera la conexión WebSocket
+          this._listeners.delete(key);
+        }
+      }
+
+      /**
+       * subscribeToThread(sectionId, postId, callback)
+       * Listener en tiempo real para las RESPUESTAS de un hilo específico.
+       * Ruta v2: sections/{sectionId}/posts/{postId}/replies
+       *
+       * @param {string}   sectionId — ID de la sección global
+       * @param {string}   postId
+       * @param {Function} callback  — fn(replies: array)
+       */
+      subscribeToThread(sectionId, postId, callback) {
+        const threadKey     = `thread:${sectionId}:${postId}`;
+        const existingUnsub = this._listeners.get(threadKey);
+        if (existingUnsub) existingUnsub();
+
+        try {
+          // ── PATH GLOBAL v2 ──
+          const repliesRef   = collection(this.db, "sections", sectionId, "posts", postId, "replies");
+          const repliesQuery = query(repliesRef, orderBy("timestamp", "asc")); // ASC = orden cronológico de conversación
+
+          const unsubFn = onSnapshot(
+            repliesQuery,
+            (snapshot) => {
+              const replies    = [];
+              const currentUID = AppState.currentUser?.uid;
+              snapshot.forEach((docSnap) => {
+                const data = docSnap.data();
+                // Shadowban check intacto
+                if (data.isShadowbanned && data._authorUID !== currentUID) return;
+                replies.push({ id: docSnap.id, ...data });
+              });
+              callback(replies);
+            },
+            (error) => {
+              console.error(`[DatabaseEngine] Error en thread ${postId}:`, error);
+            }
+          );
+
+          this._listeners.set(threadKey, unsubFn);
+
+        } catch (err) {
+          console.error("[DatabaseEngine] Error en subscribeToThread:", err);
+          throw err;
+        }
+      }
+
+      /**
+       * createPost(sectionId, content, authorData, imageURL?)
+       * ─────────────────────────────────────────────────────────────
+       * SUPER RED GLOBAL v2
+       * ─────────────────────────────────────────────────────────────
+       * Escribe un post nuevo en la colección global de la sección.
+       * Ruta pública:  sections/{sectionId}/posts/{postId}
+       * Ruta privada:  _identityLedger/{postId}
+       *
+       * CAMBIOS vs v1:
+       * - Path: sections/ en lugar de boards/
+       * - El documento público ya NO contiene campusId (red unificada)
+       * - campusId se conserva ÚNICAMENTE en _identityLedger (moderación privada)
+       * - sectionId reemplaza a boardId en los campos del documento
+       *
+       * La operación sigue siendo un WriteBatch atómico dual:
+       * ambas escrituras ocurren juntas o ninguna.
+       *
+       * @param {string}  sectionId  — ID de la sección global
+       * @param {string}  content    — Texto ya sanitizado y validado
+       * @param {Object}  authorData — { uid, email, hashID, deviceFP, campusId }
+       * @param {string?} imageURL   — URL de Firebase Storage (opcional)
+       * @returns {Promise<{postId: string}>}
+       */
+      async createPost(sectionId, content, authorData, imageURL = null) {
+        try {
+          // ── RUTAS v2 ──
+          const postsRef  = collection(this.db, "sections", sectionId, "posts");
+          const ledgerRef = collection(this.db, "_identityLedger");
+
+          // Datos PÚBLICOS — sin campusId, sin PII
+          // El feed es global: no importa de qué plantel viene el post
+          const publicPostData = {
+            hashID:          authorData.hashID,
+            content:         content,
+            imageURL:        imageURL,
+            timestamp:       serverTimestamp(),
+            replyCount:      0,
+            sectionId:       sectionId,   // v2: sectionId (antes boardId)
+            // ✗ campusId ELIMINADO del documento público — red unificada
+            isShadowbanned:  authorData.isShadowbanned || false,
+            _authorUID:      authorData.uid, // Solo para shadowban check, nunca renderizado
+          };
+
+          // Datos PRIVADOS en Identity Ledger — campusId se conserva aquí
+          // como metadato de moderación para que el admin pueda ubicar
+          // geográficamente a un usuario problemático si es necesario
+          const privateData = {
+            realEmail:       authorData.email,
+            realUID:         authorData.uid,
+            deviceFP:        authorData.deviceFP,
+            sectionId:       sectionId,
+            campusId:        authorData.campusId || "no_declarado", // Metadato privado
+            timestamp:       serverTimestamp(),
+            contentSnapshot: content,
+            type:            "post",
+          };
+
+          // Escritura atómica dual con WriteBatch
+          const batch      = writeBatch(this.db);
+          const newPostRef = doc(postsRef);
+          const ledgerEntry = doc(ledgerRef, newPostRef.id); // Mismo ID para correlación
+
+          batch.set(newPostRef,  publicPostData);
+          batch.set(ledgerEntry, { ...privateData, postId: newPostRef.id });
+
+          await batch.commit();
+
+          return { postId: newPostRef.id };
+
+        } catch (err) {
+          console.error("[DatabaseEngine] Error creando post global:", err);
+          throw new Error("No se pudo publicar tu mensaje. Intenta de nuevo.");
+        }
+      }
+
+      /**
+       * createReply(sectionId, postId, content, authorData, imageURL?)
+       * Escribe una respuesta en la subcolección global de replies.
+       * Ruta v2: sections/{sectionId}/posts/{postId}/replies/{replyId}
+       *
+       * Incrementa replyCount del post padre de forma atómica.
+       * campusId ELIMINADO del documento público — solo en Identity Ledger.
+       *
+       * @param {string}  sectionId
+       * @param {string}  postId
+       * @param {string}  content
+       * @param {Object}  authorData
+       * @param {string?} imageURL
+       * @returns {Promise<{replyId: string}>}
+       */
+      async createReply(sectionId, postId, content, authorData, imageURL = null) {
+        try {
+          // ── RUTAS v2 ──
+          const repliesRef = collection(this.db, "sections", sectionId, "posts", postId, "replies");
+          const postDocRef = doc(this.db, "sections", sectionId, "posts", postId);
+          const ledgerRef  = collection(this.db, "_identityLedger");
+
+          // Documento público de la respuesta — sin campusId
+          const replyData = {
+            hashID:         authorData.hashID,
+            content:        content,
+            imageURL:       imageURL,
+            timestamp:      serverTimestamp(),
+            parentPostId:   postId,
+            sectionId:      sectionId,   // v2: sectionId
+            // ✗ campusId ELIMINADO del documento público
+            isShadowbanned: authorData.isShadowbanned || false,
+            _authorUID:     authorData.uid,
+          };
+
+          const batch       = writeBatch(this.db);
+          const newReplyRef = doc(repliesRef);
+          const ledgerEntry = doc(ledgerRef, newReplyRef.id);
+
+          batch.set(newReplyRef, replyData);
+          // Incrementar contador de respuestas del post padre (operación atómica)
+          batch.update(postDocRef, { replyCount: increment(1) });
+          // Identity Ledger — campusId conservado como metadato privado
+          batch.set(ledgerEntry, {
+            realEmail:       authorData.email,
+            realUID:         authorData.uid,
+            deviceFP:        authorData.deviceFP,
+            sectionId:       sectionId,
+            campusId:        authorData.campusId || "no_declarado",
+            postId:          postId,
+            replyId:         newReplyRef.id,
+            timestamp:       serverTimestamp(),
+            contentSnapshot: content,
+            type:            "reply",
+          });
+
+          await batch.commit();
+
+          return { replyId: newReplyRef.id };
+
+        } catch (err) {
+          console.error("[DatabaseEngine] Error creando reply global:", err);
+          throw new Error("No se pudo enviar tu respuesta.");
+        }
+      }
+
+      /**
+       * applyShadowban(uid, deviceFP, reason, adminUID)
+       * Marca a un usuario como shadowbanned.
+       * Efectos:
+       * - Sus futuros posts tendrán isShadowbanned=true automáticamente
+       * - Sus posts existentes NO se modifican retroactivamente (para no alertarlo)
+       * - El fingerprint se registra para detectar intentos de evasión
+       *
+       * @param {string} uid       — Firebase UID del usuario infractor
+       * @param {string} deviceFP  — Device fingerprint para anti-evasión
+       * @param {string} reason    — Razón del ban (e.g., "acoso_repetido")
+       * @param {string} adminUID  — UID del administrador que aplica el ban
+       */
+      async applyShadowban(uid, deviceFP, reason, adminUID) {
+        try {
+          const bannedUserRef = doc(this.db, "_shadowbannedUsers", uid);
+          await setDoc(bannedUserRef, {
+            uid,
+            deviceFP,
+            reason,
+            score:    0,
+            bannedAt: serverTimestamp(),
+            bannedBy: adminUID,
+            active:   true,
+          });
+        } catch (err) {
+          console.error("[DatabaseEngine] Error aplicando shadowban:", err);
+          throw err;
+        }
+      }
+
+      /**
+       * isUserShadowbanned(uid, deviceFP)
+       * Verifica si un UID o su device fingerprint están en la lista de shadowban.
+       * Chequea AMBOS para resistir intentos de evasión con cuenta nueva.
+       *
+       * @param {string} uid
+       * @param {string} deviceFP
+       * @returns {Promise<boolean>}
+       */
+      async isUserShadowbanned(uid, deviceFP) {
+        try {
+          // Check por UID directo
+          const byUID = await getDoc(doc(this.db, "_shadowbannedUsers", uid));
+          if (byUID.exists() && byUID.data().active) return true;
+
+          // Check por device fingerprint (anti-evasión)
+          const fpQuery  = query(
+            collection(this.db, "_shadowbannedUsers"),
+            where("deviceFP", "==", deviceFP),
+            where("active",   "==", true),
+            limit(1)
+          );
+          const fpSnap = await new Promise((res, rej) => {
+            const unsub = onSnapshot(fpQuery, res, rej);
+            // Solo necesitamos una lectura, no un listener continuo
+            setTimeout(unsub, 1000);
+          });
+
+          return !fpSnap.empty;
+        } catch (err) {
+          console.error("[DatabaseEngine] Error checking shadowban:", err);
+          return false; // Fail open para no bloquear usuarios legítimos
+        }
+      }
+
+      /**
+       * cleanupAllListeners()
+       * Cancela TODOS los listeners activos.
+       * Llamar en el evento `beforeunload` o cuando el usuario cierra sesión.
+       */
+      cleanupAllListeners() {
+        this._listeners.forEach((unsubFn, key) => {
+          try {
+            unsubFn();
+          } catch (err) {
+            console.warn(`[DatabaseEngine] Error desuscribiendo listener ${key}:`, err);
+          }
+        });
+        this._listeners.clear();
+        this._paginationCursors.clear();
+      }
+    }
+
+    // ================================================================
+    // ███████████████████████████████████████████████████████████████
+    // SECCIÓN 4 — AD-NETWORK & REVENUE LOGIC
+    // Google Publisher Tag (GPT) integration — In-Feed + Sticky Ads
+    // ███████████████████████████████████████████████████████████████
+    // ================================================================
+
+    /**
+     * AdManager
+     * Singleton que encapsula toda la lógica de Google Publisher Tag.
+     * Maneja:
+     * - Inicialización de GPT con lazy loading y SRA (Single Request Architecture)
+     * - Definición de slots in-feed
+     * - Slot sticky mobile con auto-refresh legal
+     * - Targeting contextual por board y campus
+     */
+    class AdManager {
+      constructor() {
+        /** Array de slots GPT activos para poder refreshearlos */
+        this._activeSlots     = [];
+        /** ID del intervalo de auto-refresh */
+        this._refreshInterval = null;
+        /** Contador de ads insertados (para el in-feed frequency) */
+        this._inFeedCounter   = 0;
+        /** Slot sticky actual */
+        this._stickySlot      = null;
+        /** Mapa de divId → GPT slot para operaciones */
+        this._slotRegistry    = new Map();
+        /** Flag de inicialización */
+        this._initialized     = false;
+      }
+
+      /**
+       * initialize(sectionId)
+       * ─────────────────────────────────────────────────────────────
+       * Configura GPT para la sección actual.
+       * v2: el targeting de campus ELIMINADO — targeting solo por sección
+       * para respetar la arquitectura de red global unificada.
+       * El RPM no se afecta: el targeting por sección sigue siendo contextual.
+       *
+       * @param {string} sectionId — Sección actual para targeting contextual
+       */
+      initialize(sectionId) {
+        window.googletag = window.googletag || { cmd: [] };
+
+        window.googletag.cmd.push(() => {
+          try {
+            const gtag = window.googletag;
+
+            gtag.pubads().enableLazyLoad({
+              fetchMarginPercent:  200,
+              renderMarginPercent: 50,
+              mobileScaling:       2.0,
+            });
+
+            gtag.pubads().enableSingleRequest();
+
+            // Targeting contextual por sección — sin campus (red global)
+            gtag.pubads().setTargeting("section", sectionId); // v2: "section" en lugar de "board"
+            gtag.pubads().setTargeting("app",     "thezing");
+            // ✗ campus targeting ELIMINADO — no aplica en red unificada
+
+            gtag.enableServices();
+
+            this._initialized = true;
+            this._defineStickySlot(sectionId);
+            this._startStickyRefresh();
+
+          } catch (err) {
+            console.error("[AdManager] Error inicializando GPT:", err);
+          }
+        });
+      }
+
+      /**
+       * _defineStickySlot(boardId)
+       * Crea y muestra el banner sticky en la parte inferior del viewport mobile.
+       * Solo se muestra en viewports menores a 768px (mobile-first).
+       * Se oculta en desktop para cumplir con políticas de AdSense.
+       *
+       * @param {string} boardId
+       */
+      _defineStickySlot(boardId) {
+        window.googletag.cmd.push(() => {
+          try {
+            const gtag      = window.googletag;
+            const stickyDiv = document.getElementById("ad-sticky-footer");
+            if (!stickyDiv) return;
+
+            // Definir el slot: tamaño 320x50 (Mobile Banner estándar)
+            // Usar out-of-page slot para sticky behavior correcto
+            const stickySlot = gtag.defineOutOfPageSlot(
+              AD_SLOTS_CONFIG[boardId]?.sticky || AD_SLOTS_CONFIG.chismes.sticky,
+              "ad-sticky-footer"
+            );
+
+            if (stickySlot) {
+              stickySlot.addService(gtag.pubads());
+              this._stickySlot = stickySlot;
+              this._slotRegistry.set("ad-sticky-footer", stickySlot);
+              this._activeSlots.push(stickySlot);
+              gtag.display("ad-sticky-footer");
+            }
+
+          } catch (err) {
+            console.error("[AdManager] Error definiendo sticky slot:", err);
+          }
+        });
+      }
+
+      /**
+       * injectInFeedAd(boardId, postIndex)
+       * Inyecta un slot de anuncio in-feed después de cada IN_FEED_AD_FREQUENCY posts.
+       * Retorna el HTML string del div del anuncio para ser insertado por el UIRenderer.
+       *
+       * El slot se define en GPT y se registra para display diferido
+       * (el div debe existir en el DOM antes de llamar a googletag.display()).
+       *
+       * @param {string} boardId
+       * @param {number} postIndex — Índice del post actual en el listado
+       * @returns {string|null} — HTML string o null si no corresponde insertar ad
+       */
+      injectInFeedAd(boardId, postIndex) {
+        // Solo insertar ad en índices múltiplos de IN_FEED_AD_FREQUENCY
+        if ((postIndex + 1) % IN_FEED_AD_FREQUENCY !== 0) return null;
+
+        this._inFeedCounter++;
+        const divId    = `ad-infeed-${boardId}-${this._inFeedCounter}`;
+        const slotPath = AD_SLOTS_CONFIG[boardId]?.inFeed || AD_SLOTS_CONFIG.chismes.inFeed;
+
+        // Programar la definición del slot en GPT para cuando el div exista en DOM
+        // Usamos requestAnimationFrame para asegurar que el DOM esté listo
+        requestAnimationFrame(() => {
+          window.googletag = window.googletag || { cmd: [] };
+          window.googletag.cmd.push(() => {
+            try {
+              const gtag = window.googletag;
+              // Verificar que el div fue añadido al DOM
+              if (!document.getElementById(divId)) return;
+
+              const slot = gtag.defineSlot(slotPath, [[300, 250], [320, 100]], divId);
+              if (slot) {
+                slot.addService(gtag.pubads());
+                slot.setTargeting("position", String(this._inFeedCounter));
+                this._slotRegistry.set(divId, slot);
+                this._activeSlots.push(slot);
+                gtag.display(divId);
+              }
+            } catch (err) {
+              console.error(`[AdManager] Error definiendo in-feed slot ${divId}:`, err);
+            }
+          });
+        });
+
+        // Retornar HTML del contenedor con estilos cyberpunk para el ad
+        return `
+          <div class="ad-infeed-container" data-ad-div="${divId}">
+            <div class="ad-label">PUBLICIDAD</div>
+            <!-- AdSense ins tag como fallback -->
+            <ins class="adsbygoogle"
+                 id="${divId}"
+                 style="display:block;"
+                 data-ad-client="ca-pub-XXXXXXXXXXXXXXXX"
+                 data-ad-slot="1234567890"
+                 data-ad-format="auto"
+                 data-full-width-responsive="true">
+            </ins>
+          </div>
+        `;
+      }
+
+      /**
+       * _startStickyRefresh()
+       * Inicia el intervalo de auto-refresh legal del slot sticky.
+       * Google permite refresh con mínimo 30s entre refreshes.
+       * Usamos 60s para safe margin.
+       *
+       * IMPORTANTE: Solo refrescar slots que están en el viewport visible.
+       * Esto es un requisito de la política de Google para auto-refresh.
+       * Referencia: https://support.google.com/admanager/answer/1638712
+       */
+      _startStickyRefresh() {
+        // Limpiar intervalo anterior si existe
+        if (this._refreshInterval) {
+          clearInterval(this._refreshInterval);
+        }
+
+        this._refreshInterval = setInterval(() => {
+          try {
+            if (!this._stickySlot) return;
+
+            // Verificar que el elemento está visible antes de refreshear
+            const stickyEl = document.getElementById("ad-sticky-footer");
+            if (!stickyEl) return;
+
+            const rect = stickyEl.getBoundingClientRect();
+            const isVisible = (
+              rect.top >= 0 &&
+              rect.bottom <= (window.innerHeight || document.documentElement.clientHeight)
+            );
+
+            if (isVisible) {
+              window.googletag.cmd.push(() => {
+                // pubads().refresh() con el slot específico para no refrescar otros
+                window.googletag.pubads().refresh([this._stickySlot]);
+              });
+            }
+          } catch (err) {
+            console.error("[AdManager] Error en sticky refresh:", err);
+          }
+        }, AD_REFRESH_INTERVAL_MS);
+      }
+
+      /**
+       * destroyAllSlots()
+       * Destruye todos los slots GPT activos.
+       * Llamar cuando el usuario navega a otro board o cierra la app.
+       * Previene memory leaks y slots huérfanos.
+       */
+      destroyAllSlots() {
+        try {
+          if (this._refreshInterval) {
+            clearInterval(this._refreshInterval);
+            this._refreshInterval = null;
+          }
+
+          if (this._activeSlots.length > 0) {
+            window.googletag?.cmd.push(() => {
+              window.googletag.destroySlots(this._activeSlots);
+            });
+          }
+
+          this._activeSlots   = [];
+          this._slotRegistry  = new Map();
+          this._stickySlot    = null;
+          this._inFeedCounter = 0;
+          this._initialized   = false;
+
+        } catch (err) {
+          console.error("[AdManager] Error destruyendo slots:", err);
+        }
+      }
+    }
+
+    // Instancia singleton del AdManager
+    const Ads = new AdManager();
+
+    // ================================================================
+    // ███████████████████████████████████████████████████████████████
+    // SECCIÓN 5 — UI RENDERING ENGINE
+    // Funciones de renderizado: posts, replies, neon animations,
+    // lazy loading de imágenes, scroll infinito
+    // ███████████████████████████████████████████████████████████████
+    // ================================================================
+
+    /**
+     * AppState
+     * Estado global de la aplicación (mini store reactivo).
+     * v2: eliminado currentCampus — la red es global, sin partición de plantel.
+     */
+    const AppState = {
+      currentUser:    null,   // Firebase User object
+      currentBoard:   null,   // ID de la sección activa
+      currentHashID:  null,   // HashID público del usuario (#XXXXXX)
+      // ✗ currentCampus ELIMINADO — red global sin filtros de plantel
+      deviceFP:       null,   // Device fingerprint (anti-evasión de shadowban)
+      isShadowbanned: false,  // Estado de shadowban del usuario actual
+      postsCache:     new Map(), // Cache en memoria de posts renderizados
+      scrollObserver: null,   // IntersectionObserver para lazy loading de imágenes
+    };
+
+    /**
+     * UIRenderer
+     * Objeto con funciones puras de renderizado.
+     * Cada función genera HTML string o manipula el DOM directamente.
+     * Separación estricta entre datos y presentación.
+     */
+    const UIRenderer = {
+
+      /**
+       * renderBoardNav()
+       * Renderiza la barra de navegación con las 6 secciones globales.
+       * Resalta la sección activa con su color neón correspondiente.
+       */
+      renderBoardNav() {
+        const nav = document.getElementById("board-nav");
+        if (!nav) return;
+
+        nav.innerHTML = Object.values(BOARD_DEFINITIONS).map(board => `
+          <button
+            class="board-nav-btn ${AppState.currentBoard === board.id ? "active" : ""}"
+            style="
+              --board-color: ${board.color};
+              border-color: ${AppState.currentBoard === board.id ? board.color : "transparent"};
+              color: ${AppState.currentBoard === board.id ? board.color : "#888"};
+              ${AppState.currentBoard === board.id ? `box-shadow: ${board.shadow};` : ""}
+            "
+            onclick="window.navigateToBoard('${board.id}')"
+            aria-label="Ir a ${board.label}"
+          >
+            <span class="board-emoji">${board.emoji}</span>
+            <span class="board-label">${board.navLabel}</span>
+          </button>
+        `).join("");
+      },
+
+      /**
+       * renderPost(post, index, boardDef)
+       * Renderiza un post individual con su metadata y controles.
+       * Incluye la lógica de lazy loading para imágenes.
+       * Si index % IN_FEED_AD_FREQUENCY === 3, inserta un ad después.
+       *
+       * @param {Object} post     — Objeto de datos del post (Firestore doc)
+       * @param {number} index    — Índice en el listado (para in-feed ads)
+       * @param {Object} boardDef — Definición del board (BOARD_DEFINITIONS[boardId])
+       * @returns {string} — HTML string del post
+       */
+      renderPost(post, index, boardDef) {
+        const timeAgo   = this._timeAgo(post.timestamp?.toDate());
+        const imagePart = post.imageURL
+          ? `<div class="post-image-container">
+               <!-- data-src para lazy loading — src real se asigna por IntersectionObserver -->
+               <img
+                 class="post-image lazy-image"
+                 data-src="${Security.sanitizeInput(post.imageURL)}"
+                 src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+                 alt="Imagen adjunta"
+                 loading="lazy"
+                 onerror="this.style.display='none'"
+               />
+             </div>`
+          : "";
+
+        const postHTML = `
+          <article
+            class="post-card ${boardDef.glowClass}"
+            data-post-id="${post.id}"
+            data-board-id="${boardDef.id}"
+            style="--neon-color: ${boardDef.color}; --neon-shadow: ${boardDef.shadow};"
+          >
+            <!-- Header del post con identidad anónima -->
+            <header class="post-header">
+              <span class="post-hash-id" style="color: ${boardDef.color};">${post.hashID}</span>
+              <span class="post-campus">[${post.campusId}]</span>
+              <time class="post-time" datetime="${post.timestamp?.toDate()?.toISOString() || ""}">
+                ${timeAgo}
+              </time>
+              <span class="post-id-small">${post.id.slice(0, 8)}...</span>
+            </header>
+
+            <!-- Contenido del post (ya sanitizado en DB) -->
+            <div class="post-content">${this._linkify(post.content)}</div>
+
+            <!-- Imagen con lazy loading -->
+            ${imagePart}
+
+            <!-- Footer con acciones -->
+            <footer class="post-footer">
+              <button
+                class="reply-btn"
+                style="color: ${boardDef.color};"
+                onclick="window.openThread('${boardDef.id}', '${post.id}')"
+                aria-label="Responder a este post"
+              >
+                💬 ${post.replyCount || 0} respuestas
+              </button>
+              <button
+                class="report-btn"
+                onclick="window.reportPost('${boardDef.id}', '${post.id}')"
+                aria-label="Reportar este post"
+              >
+                ⚑ Reportar
+              </button>
+            </footer>
+          </article>
+        `;
+
+        // Verificar si debe ir un ad después de este post
+        const adHTML = Ads.injectInFeedAd(boardDef.id, index) || "";
+
+        return postHTML + adHTML;
+      },
+
+      /**
+       * renderThread(boardId, post, replies)
+       * Renderiza el hilo completo: post original + todas sus respuestas.
+       * Las respuestas están en orden cronológico (ASC) para lectura natural.
+       *
+       * @param {string}   boardId
+       * @param {Object}   post    — Post original
+       * @param {Object[]} replies — Array de respuestas
+       */
+      renderThread(boardId, post, replies) {
+        const boardDef = BOARD_DEFINITIONS[boardId];
+        const modal    = document.getElementById("thread-modal");
+        if (!modal) return;
+
+        // Header del hilo
+        let html = `
+          <div class="thread-container" style="--neon-color: ${boardDef.color};">
+            <div class="thread-header">
+              <button class="close-thread-btn" onclick="window.closeThread()">✕ CERRAR</button>
+              <h2 style="color: ${boardDef.color};">${boardDef.emoji} ${boardDef.label}</h2>
+            </div>
+
+            <!-- Post original -->
+            <div class="thread-op">
+              ${this.renderPost(post, 0, boardDef)}
+            </div>
+
+            <!-- Formulario de reply -->
+            <div class="reply-form-container" style="border-color: ${boardDef.colorDim};">
+              <h3 style="color: ${boardDef.color};">Responder al hilo</h3>
+              <textarea
+                id="reply-input"
+                class="reply-textarea"
+                placeholder="Tu respuesta... (anónimo como ${AppState.currentHashID})"
+                maxlength="1000"
+                style="border-color: ${boardDef.colorDim}; caret-color: ${boardDef.color};"
+              ></textarea>
+              <div class="reply-form-footer">
+                <label class="image-upload-label" style="color: ${boardDef.color};">
+                  📎 Adjuntar imagen
+                  <input type="file" id="reply-image-input" accept="image/*" hidden onchange="window.previewReplyImage(this)" />
+                </label>
+                <span class="char-counter" id="reply-char-counter">0/1000</span>
+                <button
+                  class="submit-reply-btn"
+                  style="background: ${boardDef.color}; color: #000;"
+                  onclick="window.submitReply('${boardId}', '${post.id}')"
+                >
+                  ENVIAR ⚡
+                </button>
+              </div>
+              <div id="reply-image-preview" class="image-preview-container"></div>
+            </div>
+
+            <!-- Lista de respuestas -->
+            <div class="replies-list" id="replies-list">
+              ${replies.length === 0
+                ? `<p class="no-replies" style="color: ${boardDef.colorDim};">Sé el primero en responder.</p>`
+                : replies.map((reply, i) => this._renderReply(reply, boardDef, i)).join("")
+              }
+            </div>
+          </div>
+        `;
+
+        modal.innerHTML = html;
+        modal.style.display = "flex";
+
+        // Inicializar lazy loading para imágenes en el thread
+        this.initLazyLoading();
+
+        // Character counter para el textarea de reply
+        const textarea = document.getElementById("reply-input");
+        if (textarea) {
+          textarea.addEventListener("input", (e) => {
+            const counter = document.getElementById("reply-char-counter");
+            if (counter) counter.textContent = `${e.target.value.length}/1000`;
+          });
+        }
+      },
+
+      /**
+       * _renderReply(reply, boardDef, index)
+       * Renderiza una respuesta individual en el hilo.
+       * Versión más compacta que renderPost (sin footer de acciones).
+       *
+       * @private
+       */
+      _renderReply(reply, boardDef, index) {
+        const timeAgo   = this._timeAgo(reply.timestamp?.toDate());
+        const imagePart = reply.imageURL
+          ? `<img class="reply-image lazy-image" data-src="${reply.imageURL}" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Imagen" loading="lazy" />`
+          : "";
+
+        return `
+          <div class="reply-card" data-reply-id="${reply.id}">
+            <div class="reply-meta">
+              <span class="reply-hash" style="color: ${boardDef.color};">${reply.hashID}</span>
+              <time class="reply-time">${timeAgo}</time>
+            </div>
+            <div class="reply-content">${this._linkify(reply.content)}</div>
+            ${imagePart}
+          </div>
+        `;
+      },
+
+      /**
+       * updateBoardFeed(posts, boardId)
+       * Actualiza el feed del board con los posts más recientes.
+       * Llamado por el onSnapshot handler cada vez que hay cambios en Firestore.
+       * Usa requestAnimationFrame para no bloquear el thread principal.
+       *
+       * @param {Object[]} posts
+       * @param {string}   boardId
+       */
+      updateBoardFeed(posts, boardId) {
+        const boardDef  = BOARD_DEFINITIONS[boardId];
+        const feedEl    = document.getElementById("board-feed");
+        if (!feedEl) return;
+
+        requestAnimationFrame(() => {
+          if (posts.length === 0) {
+            feedEl.innerHTML = `
+              <div class="empty-board" style="color: ${boardDef.colorDim};">
+                <div class="empty-icon">${boardDef.emoji}</div>
+                <p>Nadie ha publicado aquí aún.</p>
+                <p>Sé el primero.</p>
+              </div>
+            `;
+            return;
+          }
+
+          // Renderizar posts con in-feed ads intercalados
+          feedEl.innerHTML = posts.map((post, i) =>
+            this.renderPost(post, i, boardDef)
+          ).join("");
+
+          // Re-inicializar lazy loading en las nuevas imágenes
+          this.initLazyLoading();
+
+          // Animar entry de los posts (staggered animation)
+          this._animatePostsEntry(feedEl);
+        });
+      },
+
+      /**
+       * renderNewPostForm(sectionId)
+       * Renderiza el formulario para crear un post en la sección global.
+       * v2: sin selector de campus — la red es única y global.
+       */
+      renderNewPostForm(sectionId) {
+        const boardDef  = BOARD_DEFINITIONS[sectionId];
+        const formEl    = document.getElementById("new-post-form-container");
+        if (!formEl) return;
+
+        formEl.innerHTML = `
+          <div class="new-post-form" style="--neon-color: ${boardDef.color}; border-color: ${boardDef.colorDim};">
+            <div class="new-post-header">
+              <span style="color: ${boardDef.color};">
+                ${boardDef.emoji} ${boardDef.label}
+              </span>
+              <span class="anon-badge" style="background: ${boardDef.color}20; border-color: ${boardDef.colorDim}; color: ${boardDef.color};">
+                ANON ${AppState.currentHashID || "#??????"}
+              </span>
+            </div>
+            <textarea
+              id="new-post-input"
+              class="new-post-textarea"
+              placeholder="Habla con los 22,000. Escribe anónimo como ${AppState.currentHashID || "#??????"}..."
+              maxlength="2000"
+              style="caret-color: ${boardDef.color}; border-color: ${boardDef.colorDim};"
+            ></textarea>
+            <div class="new-post-footer">
+              <label class="image-upload-label" style="color: ${boardDef.color};">
+                📎 Imagen
+                <input type="file" id="post-image-input" accept="image/*" hidden onchange="window.previewPostImage(this)" />
+              </label>
+              <span class="char-counter" id="post-char-counter">0/2000</span>
+              <button
+                class="submit-post-btn"
+                style="background: ${boardDef.color}; color: #000; box-shadow: ${boardDef.shadow};"
+                onclick="window.submitNewPost('${sectionId}')"
+              >
+                PUBLICAR ⚡
+              </button>
+            </div>
+            <div id="post-image-preview" class="image-preview-container"></div>
+            <div id="post-error-msg" class="error-msg" style="color: #FF4444;" aria-live="assertive"></div>
+          </div>
+        `;
+
+        // Contador de caracteres en tiempo real
+        const textarea = document.getElementById("new-post-input");
+        if (textarea) {
+          textarea.addEventListener("input", (e) => {
+            const counter = document.getElementById("post-char-counter");
+            if (counter) counter.textContent = `${e.target.value.length}/2000`;
+          });
+        }
+      },
+
+      /**
+       * initLazyLoading()
+       * Configura IntersectionObserver para lazy loading de imágenes.
+       * Las imágenes con class "lazy-image" y atributo "data-src"
+       * solo cargan su src real cuando entran en el viewport.
+       * Mejora significativamente el performance inicial (LCP, FID).
+       */
+      initLazyLoading() {
+        // Desconectar observer anterior si existe
+        if (AppState.scrollObserver) {
+          AppState.scrollObserver.disconnect();
+        }
+
+        // Crear nuevo IntersectionObserver con threshold 0.1
+        // (carga cuando el 10% de la imagen es visible)
+        AppState.scrollObserver = new IntersectionObserver(
+          (entries, observer) => {
+            entries.forEach((entry) => {
+              if (entry.isIntersecting) {
+                const img     = entry.target;
+                const dataSrc = img.getAttribute("data-src");
+                if (dataSrc) {
+                  // Asignar src real — el browser descarga la imagen
+                  img.src = dataSrc;
+                  img.removeAttribute("data-src");
+                  img.classList.add("loaded");
+                  // Dejar de observar esta imagen (ya cargó)
+                  observer.unobserve(img);
+                }
+              }
+            });
+          },
+          { rootMargin: "100px 0px", threshold: 0.1 }
+        );
+
+        // Observar todas las imágenes lazy del DOM actual
+        document.querySelectorAll(".lazy-image[data-src]").forEach((img) => {
+          AppState.scrollObserver.observe(img);
+        });
+      },
+
+      /**
+       * _animatePostsEntry(container)
+       * Aplica animación staggered de entrada a los posts recién renderizados.
+       * Cada post tiene un delay incremental para efecto cascada.
+       *
+       * @private
+       */
+      _animatePostsEntry(container) {
+        const posts = container.querySelectorAll(".post-card");
+        posts.forEach((post, i) => {
+          post.style.opacity         = "0";
+          post.style.transform       = "translateY(20px)";
+          post.style.transition      = `opacity 0.3s ease ${i * 0.05}s, transform 0.3s ease ${i * 0.05}s`;
+          requestAnimationFrame(() => {
+            post.style.opacity   = "1";
+            post.style.transform = "translateY(0)";
+          });
+        });
+      },
+
+      /**
+       * showBoardError(boardId, errorMessage)
+       * Muestra un estado de error en el feed del board.
+       *
+       * @param {string} boardId
+       * @param {string} errorMessage
+       */
+      showBoardError(boardId, errorMessage) {
+        const feedEl = document.getElementById("board-feed");
+        if (feedEl) {
+          feedEl.innerHTML = `
+            <div class="error-state">
+              <span class="error-icon">⚠️</span>
+              <p>Error cargando posts: ${errorMessage}</p>
+              <button onclick="window.navigateToBoard('${boardId}')">Reintentar</button>
+            </div>
+          `;
+        }
+      },
+
+      /**
+       * showToast(message, type)
+       * Muestra una notificación temporal (toast) al usuario.
+       * Types: "success", "error", "warning", "info"
+       *
+       * @param {string} message
+       * @param {string} type
+       */
+      showToast(message, type = "info") {
+        const colors   = { success: "#00FF41", error: "#FF4444", warning: "#FF4500", info: "#00FFFF" };
+        const toast    = document.createElement("div");
+        toast.className = "toast-notification";
+        toast.style.cssText = `
+          position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+          background: #0a0a0f; border: 1px solid ${colors[type]};
+          color: ${colors[type]}; padding: 12px 20px; border-radius: 4px;
+          font-family: 'Share Tech Mono', monospace; font-size: 13px;
+          box-shadow: 0 0 12px ${colors[type]}60; z-index: 9999;
+          animation: toastIn 0.3s ease; white-space: nowrap;
+        `;
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        setTimeout(() => {
+          toast.style.animation = "toastOut 0.3s ease forwards";
+          setTimeout(() => toast.remove(), 300);
+        }, 3000);
+      },
+
+      /**
+       * _timeAgo(date)
+       * Convierte una fecha a formato relativo en español.
+       * Ej: "hace 5 minutos", "hace 2 horas", "hace 3 días"
+       *
+       * @param {Date|null} date
+       * @returns {string}
+       * @private
+       */
+      _timeAgo(date) {
+        if (!date) return "justo ahora";
+        const seconds = Math.floor((new Date() - date) / 1000);
+        if (seconds < 60)   return `hace ${seconds}s`;
+        if (seconds < 3600) return `hace ${Math.floor(seconds / 60)}min`;
+        if (seconds < 86400)return `hace ${Math.floor(seconds / 3600)}h`;
+        return `hace ${Math.floor(seconds / 86400)}d`;
+      },
+
+      /**
+       * _linkify(text)
+       * Convierte URLs en texto plano en elementos <a> clicables.
+       * Solo permite dominios internos (thezing.cecytec.edu.mx) por seguridad.
+       * URLs externas se muestran pero no son clicables.
+       *
+       * @param {string} text — Texto ya sanitizado
+       * @returns {string} — Texto con URLs convertidas a links seguros
+       * @private
+       */
+      _linkify(text) {
+        if (!text) return "";
+        // Solo convertir URLs internas en links reales
+        return text.replace(
+          /https?:\/\/(thezing\.cecytec\.edu\.mx[^\s]*)/g,
+          '<a href="https://$1" class="post-link" target="_blank" rel="noopener noreferrer">$1</a>'
+        );
+      },
+    };
+
+    // ================================================================
+    // ███████████████████████████████████████████████████████████████
+    // SECCIÓN 6 — AUTHENTICATION & SESSION MANAGEMENT
+    // Google OAuth + Identidad anónima + Gestión de sesión
+    // ███████████████████████████████████████████████████████████████
+    // ================================================================
+
+    /**
+     * AuthManager
+     * Maneja el ciclo completo de autenticación:
+     * 1. Google Sign-In via popup
+     * 2. Generación de identidad anónima (HashID)
+     * 3. Device fingerprinting
+     * 4. Verificación de shadowban status
+     * 5. Gestión del estado de sesión persistente
+     */
+    class AuthManager {
+      constructor(auth, db) {
+        this.auth     = auth;
+        this.db       = db;
+        this.provider = new GoogleAuthProvider();
+        // Forzar selección de cuenta cada vez (previene auto-login indeseable)
+        this.provider.setCustomParameters({ prompt: "select_account" });
+      }
+
+      /**
+       * initialize()
+       * Inicia el listener de estado de autenticación.
+       * onAuthStateChanged es el único punto donde se debe responder
+       * a cambios de sesión — nunca reliar en estado local.
+       *
+       * Flujo de inicialización:
+       * 1. Usuario autenticado → cargar perfil anónimo → mostrar app
+       * 2. Usuario no autenticado → mostrar pantalla de login
+       */
+      initialize() {
+        onAuthStateChanged(this.auth, async (user) => {
+          if (user) {
+            try {
+              // Usuario autenticado: configurar identidad anónima
+              await this._setupUserSession(user);
+              this._showApp();
+            } catch (err) {
+              console.error("[AuthManager] Error configurando sesión:", err);
+              UIRenderer.showToast("Error al iniciar sesión. Intenta de nuevo.", "error");
+              this.signOut();
+            }
+          } else {
+            // No hay sesión: mostrar pantalla de login
+            this._clearSession();
+            this._showLoginScreen();
+          }
+        });
+      }
+
+      /**
+       * _setupUserSession(firebaseUser)
+       * Configura la sesión completa del usuario:
+       * 1. Genera HashID determinístico
+       * 2. Genera device fingerprint
+       * 3. Verifica si está shadowbanned
+       * 4. Actualiza AppState
+       * 5. Registra/actualiza perfil en Firestore (sin PII en colección pública)
+       *
+       * @param {Object} firebaseUser — Firebase User object
+       * @private
+       */
+      async _setupUserSession(firebaseUser) {
+        // 1. Generar HashID anónimo determinístico
+        const hashID   = await Security.generateHashID(firebaseUser.uid);
+
+        // 2. Generar device fingerprint para anti-evasión de shadowban
+        const deviceFP = await Security.generateDeviceFingerprint();
+
+        // 3. Verificar shadowban por UID y fingerprint
+        const dbEngine = new DatabaseEngine(this.db);
+        const isBanned = await dbEngine.isUserShadowbanned(firebaseUser.uid, deviceFP);
+
+        // 4. Actualizar AppState con datos de sesión
+        AppState.currentUser    = firebaseUser;
+        AppState.currentHashID  = hashID;
+        AppState.deviceFP       = deviceFP;
+        AppState.isShadowbanned = isBanned;
+
+        // 5. Actualizar perfil anónimo en Firestore (colección users - sin email, sin campus)
+        try {
+          const userProfileRef = doc(this.db, "users", firebaseUser.uid);
+          await setDoc(userProfileRef, {
+            hashID:   hashID,
+            lastSeen: serverTimestamp(),
+            // ✗ campusId ELIMINADO del perfil público — red global
+          }, { merge: true });
+        } catch (err) {
+          console.warn("[AuthManager] No se pudo actualizar perfil:", err);
+        }
+
+        // Log de analytics (sin PII)
+        try {
+          const analytics = getAnalytics(App);
+          logEvent(analytics, "user_session_start", {
+            section: AppState.currentBoard || "none",
+            // ✗ campus eliminado — red global
+          });
+        } catch (err) {
+          // Analytics no crítico
+        }
+      }
+
+      /**
+       * signInWithGoogle()
+       * Inicia el flujo de autenticación con Google via popup.
+       * Maneja los errores más comunes de manera amigable.
+       */
+      async signInWithGoogle() {
+        const loginBtn = document.getElementById("login-btn");
+        if (loginBtn) {
+          loginBtn.disabled     = true;
+          loginBtn.textContent  = "Conectando...";
+        }
+
+        try {
+          await signInWithPopup(this.auth, this.provider);
+          // onAuthStateChanged se encargará del resto
+        } catch (err) {
+          console.error("[AuthManager] Error en Google Sign-In:", err);
+
+          // Mapear códigos de error Firebase a mensajes amigables
+          const errorMessages = {
+            "auth/popup-blocked":        "Tu navegador bloqueó el popup. Permítelo e intenta de nuevo.",
+            "auth/popup-closed-by-user": "Cerraste la ventana de login. Inténtalo de nuevo.",
+            "auth/cancelled-popup-request": "Solicitud cancelada. Intenta de nuevo.",
+            "auth/network-request-failed": "Sin conexión a internet.",
+            "auth/too-many-requests":    "Demasiados intentos. Espera unos minutos.",
+          };
+
+          const msg = errorMessages[err.code] || "Error desconocido al iniciar sesión.";
+          UIRenderer.showToast(msg, "error");
+
+          if (loginBtn) {
+            loginBtn.disabled    = false;
+            loginBtn.textContent = "Entrar con Google";
+          }
+        }
+      }
+
+      /**
+       * signOut()
+       * Cierra la sesión del usuario y limpia todos los recursos activos.
+       */
+      async signOut() {
+        try {
+          // Limpiar listeners de Firestore antes de cerrar sesión
+          if (window._dbEngine) {
+            window._dbEngine.cleanupAllListeners();
+          }
+
+          // Destruir slots publicitarios
+          Ads.destroyAllSlots();
+
+          // Cerrar sesión de Firebase Auth
+          await signOut(this.auth);
+
+          // _clearSession y _showLoginScreen son llamados por onAuthStateChanged
+
+        } catch (err) {
+          console.error("[AuthManager] Error en signOut:", err);
+        }
+      }
+
+      /**
+       * _clearSession()
+       * Limpia el AppState al cerrar sesión.
+       * @private
+       */
+      _clearSession() {
+        AppState.currentUser    = null;
+        AppState.currentHashID  = null;
+        AppState.deviceFP       = null;
+        AppState.isShadowbanned = false;
+        AppState.currentBoard   = null;
+      }
+
+      /**
+       * _showApp()
+       * Transición de la pantalla de login a la app principal.
+       * Navega automáticamente al board por defecto (/chismes).
+       * @private
+       */
+      _showApp() {
+        const loginScreen = document.getElementById("login-screen");
+        const appScreen   = document.getElementById("app-screen");
+
+        if (loginScreen) loginScreen.style.display = "none";
+        if (appScreen)   appScreen.style.display   = "flex";
+
+        // Actualizar UI con el HashID del usuario
+        const hashDisplay = document.getElementById("user-hash-display");
+        if (hashDisplay) {
+          hashDisplay.textContent = AppState.currentHashID;
+        }
+
+        // Navegar al board por defecto
+        window.navigateToBoard("chismes");
+      }
+
+      /**
+       * _showLoginScreen()
+       * Muestra la pantalla de login y oculta la app.
+       * @private
+       */
+      _showLoginScreen() {
+        const loginScreen = document.getElementById("login-screen");
+        const appScreen   = document.getElementById("app-screen");
+
+        if (loginScreen) loginScreen.style.display = "flex";
+        if (appScreen)   appScreen.style.display   = "none";
+      }
+    }
+
+    // ================================================================
+    // INICIALIZACIÓN DE LA APLICACIÓN
+    // Punto de entrada principal — ejecutado cuando el módulo se carga
+    // ================================================================
+
+    /**
+     * Inicializar Firebase y todos los servicios
+     */
+    let App, DB, Auth, AuthMgr, DBEngine;
+
+    try {
+      App    = initializeApp(FIREBASE_CONFIG);
+      DB     = getFirestore(App);
+      Auth   = getAuth(App);
+      AuthMgr = new AuthManager(Auth, DB);
+      DBEngine = new DatabaseEngine(DB);
+
+      // Exponer DBEngine globalmente para acceso desde funciones window.*
+      window._dbEngine  = DBEngine;
+      window._auth      = Auth;
+      window._authMgr   = AuthMgr;
+
+    } catch (err) {
+      console.error("[App Init] Error crítico inicializando Firebase:", err);
+      document.body.innerHTML = `
+        <div style="color:#FF4444;font-family:monospace;padding:20px;background:#0a0a0f;min-height:100vh;">
+          <h1>⚠️ Error de configuración</h1>
+          <p>No se pudo conectar con los servidores. Verifica la configuración de Firebase.</p>
+          <code>${err.message}</code>
+        </div>
+      `;
+    }
+
+    /**
+     * navigateToBoard(sectionId)
+     * ─────────────────────────────────────────────────────────────
+     * SUPER RED GLOBAL v2 — Sin filtro de campus
+     * ─────────────────────────────────────────────────────────────
+     * Navega a una sección global. El feed que se carga es el mismo
+     * para todos los usuarios de la red, sin importar su plantel.
+     */
+    window.navigateToBoard = function(sectionId) {
+      const boardDef = BOARD_DEFINITIONS[sectionId];
+      if (!boardDef) {
+        console.error(`[navigateToBoard] Sección desconocida: ${sectionId}`);
+        return;
+      }
+
+      try {
+        // Cancelar listener anterior
+        if (AppState.currentBoard) {
+          DBEngine.unsubscribeFromBoard(AppState.currentBoard);
+        }
+
+        // Destruir slots de ads de la sección anterior
+        Ads.destroyAllSlots();
+
+        // Actualizar estado global
+        AppState.currentBoard = sectionId;
+
+        // Actualizar barra de navegación
+        UIRenderer.renderBoardNav();
+
+        // Renderizar formulario de nuevo post (sin selector de campus)
+        UIRenderer.renderNewPostForm(sectionId);
+
+        // Actualizar título y header
+        document.title = `TheZing — ${boardDef.label}`;
+        const boardHeader = document.getElementById("board-header");
+        if (boardHeader) {
+          boardHeader.textContent = boardDef.label;
+          boardHeader.style.color = boardDef.color;
+          boardHeader.style.textShadow = boardDef.shadow;
+        }
+
+        // Actualizar variables CSS de color activo
+        document.documentElement.style.setProperty("--active-neon",   boardDef.color);
+        document.documentElement.style.setProperty("--active-shadow", boardDef.shadow);
+
+        // Skeleton loader mientras Firestore entrega datos
+        const feedEl = document.getElementById("board-feed");
+        if (feedEl) {
+          feedEl.innerHTML = Array(5).fill(0).map(() => `
+            <div class="post-skeleton">
+              <div class="skeleton-line short"></div>
+              <div class="skeleton-line long"></div>
+              <div class="skeleton-line medium"></div>
+            </div>
+          `).join("");
+        }
+
+        // Inicializar AdManager — v2: solo sectionId, sin campusId
+        Ads.initialize(sectionId);
+
+        // Suscribir al feed global de la sección — v2: SIN campusFilter
+        DBEngine.subscribeToBoard(
+          sectionId,
+          (posts) => UIRenderer.updateBoardFeed(posts, sectionId)
+          // ✗ campusFilter ELIMINADO — feed global unificado
+        );
+
+      } catch (err) {
+        console.error("[navigateToBoard] Error:", err);
+        UIRenderer.showToast(`Error al cargar ${boardDef.label}`, "error");
+      }
+    };
+
+    /**
+     * submitNewPost(sectionId)
+     * Handler del botón "Publicar" — v2: sin campus selector.
+     * campusId en authorData se omite del documento público.
+     * Se pasa "global" como valor neutro para el Identity Ledger privado.
+     */
+    window.submitNewPost = async function(sectionId) {
+      if (!AppState.currentUser) {
+        UIRenderer.showToast("Debes iniciar sesión para publicar.", "warning");
+        return;
+      }
+
+      const textarea   = document.getElementById("new-post-input");
+      const errorEl    = document.getElementById("post-error-msg");
+      const submitBtn  = document.querySelector(".submit-post-btn");
+      const imageInput = document.getElementById("post-image-input");
+
+      if (!textarea) return;
+
+      const rawContent = textarea.value;
+      if (!rawContent.trim()) {
+        if (errorEl) errorEl.textContent = "El mensaje no puede estar vacío.";
+        return;
+      }
+
+      const cleanContent = Security.sanitizeInput(rawContent);
+      const policyResult = Security.checkContentPolicy(cleanContent);
+
+      if (!policyResult.allowed) {
+        if (errorEl) errorEl.textContent = "⚠️ Tu mensaje viola las reglas de la comunidad.";
+        UIRenderer.showToast("Mensaje rechazado por política de contenido.", "error");
+        if (policyResult.shadowban) {
+          console.warn(`[ModerationSystem] Score shadowban excedido para UID: ${AppState.currentUser.uid}`);
+        }
+        return;
+      }
+
+      if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Enviando..."; }
+      if (errorEl)   errorEl.textContent = "";
+
+      try {
+        let imageURL = null;
+        if (imageInput?.files?.[0]) {
+          const storage = getStorage(App);
+          const file    = imageInput.files[0];
+
+          if (file.size > 5 * 1024 * 1024) {
+            if (errorEl) errorEl.textContent = "La imagen no puede superar 5MB.";
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "PUBLICAR ⚡"; }
+            return;
+          }
+          if (!["image/jpeg","image/png","image/gif","image/webp"].includes(file.type)) {
+            if (errorEl) errorEl.textContent = "Solo se permiten imágenes JPG, PNG, GIF o WebP.";
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "PUBLICAR ⚡"; }
+            return;
+          }
+
+          // Path en Storage: sections/{sectionId}/{uid}/{timestamp}_{filename}
+          const filePath = `sections/${sectionId}/${AppState.currentUser.uid}/${Date.now()}_${file.name}`;
+          const fileRef  = storageRef(storage, filePath);
+          const snapshot = await uploadBytes(fileRef, file);
+          imageURL       = await getDownloadURL(snapshot.ref);
+        }
+
+        // authorData v2: campusId como "global" — no se escribe en el doc público
+        const authorData = {
+          uid:            AppState.currentUser.uid,
+          email:          AppState.currentUser.email,
+          hashID:         AppState.currentHashID,
+          deviceFP:       AppState.deviceFP,
+          campusId:       "global",   // Valor neutro para Identity Ledger
+          isShadowbanned: AppState.isShadowbanned || policyResult.shadowban,
+        };
+
+        await DBEngine.createPost(sectionId, cleanContent, authorData, imageURL);
+
+        // Limpiar formulario
+        textarea.value = "";
+        if (imageInput) imageInput.value = "";
+        const preview = document.getElementById("post-image-preview");
+        if (preview)  preview.innerHTML = "";
+        const counter = document.getElementById("post-char-counter");
+        if (counter)  counter.textContent = "0/2000";
+
+        UIRenderer.showToast("✓ Post publicado en la red.", "success");
+
+      } catch (err) {
+        console.error("[submitNewPost] Error:", err);
+        if (errorEl) errorEl.textContent = err.message || "Error al publicar.";
+        UIRenderer.showToast("Error al publicar. Intenta de nuevo.", "error");
+      } finally {
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "PUBLICAR ⚡"; }
+      }
+    };
+
+    /**
+     * openThread(boardId, postId)
+     * Abre el modal del hilo completo para un post.
+     * Crea un listener en tiempo real para las respuestas.
+     */
+    window.openThread = async function(boardId, postId) {
+      try {
+        // Obtener el post original — ruta v2: sections/
+        const postRef  = doc(DB, "sections", boardId, "posts", postId);
+        const postSnap = await getDoc(postRef);
+
+        if (!postSnap.exists()) {
+          UIRenderer.showToast("Este post ya no existe.", "warning");
+          return;
+        }
+
+        const post = { id: postSnap.id, ...postSnap.data() };
+
+        // Mostrar modal con spinner mientras carga
+        const modal = document.getElementById("thread-modal");
+        if (modal) {
+          modal.style.display = "flex";
+          modal.innerHTML = `<div class="thread-loading">⚡ Cargando hilo...</div>`;
+        }
+
+        // Suscribir a las respuestas en tiempo real
+        DBEngine.subscribeToThread(boardId, postId, (replies) => {
+          UIRenderer.renderThread(boardId, post, replies);
+        });
+
+      } catch (err) {
+        console.error("[openThread] Error:", err);
+        UIRenderer.showToast("Error abriendo el hilo.", "error");
+      }
+    };
+
+    /**
+     * closeThread()
+     * Cierra el modal del hilo y cancela el listener de replies.
+     */
+    window.closeThread = function() {
+      const modal = document.getElementById("thread-modal");
+      if (modal) {
+        modal.style.display = "none";
+        modal.innerHTML     = "";
+      }
+    };
+
+    /**
+     * submitReply(boardId, postId)
+     * Handler del botón de envío de respuesta en un hilo.
+     */
+    window.submitReply = async function(boardId, postId) {
+      if (!AppState.currentUser) {
+        UIRenderer.showToast("Inicia sesión para responder.", "warning");
+        return;
+      }
+
+      const textarea  = document.getElementById("reply-input");
+      const submitBtn = document.querySelector(".submit-reply-btn");
+      if (!textarea) return;
+
+      const rawContent = textarea.value;
+      if (!rawContent.trim()) return;
+
+      const cleanContent  = Security.sanitizeInput(rawContent);
+      const policyResult  = Security.checkContentPolicy(cleanContent);
+
+      if (!policyResult.allowed) {
+        UIRenderer.showToast("Respuesta rechazada por política de contenido.", "error");
+        return;
+      }
+
+      if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Enviando..."; }
+
+      try {
+        const authorData = {
+          uid:            AppState.currentUser.uid,
+          email:          AppState.currentUser.email,
+          hashID:         AppState.currentHashID,
+          deviceFP:       AppState.deviceFP,
+          campusId:       "global",   // v2: valor neutro — no se escribe en doc público
+          isShadowbanned: AppState.isShadowbanned || policyResult.shadowban,
+        };
+
+        await DBEngine.createReply(boardId, postId, cleanContent, authorData);
+        textarea.value = "";
+        const counter  = document.getElementById("reply-char-counter");
+        if (counter) counter.textContent = "0/1000";
+
+      } catch (err) {
+        console.error("[submitReply] Error:", err);
+        UIRenderer.showToast("Error al enviar respuesta.", "error");
+      } finally {
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "ENVIAR ⚡"; }
+      }
+    };
+
+    /**
+     * reportPost(boardId, postId)
+     * Permite a usuarios reportar posts para revisión del admin.
+     * Crea un documento en la colección `_reports` con los datos del reporte.
+     */
+    window.reportPost = async function(boardId, postId) {
+      if (!AppState.currentUser) {
+        UIRenderer.showToast("Inicia sesión para reportar.", "warning");
+        return;
+      }
+
+      try {
+        const reportsRef = collection(DB, "_reports");
+        await addDoc(reportsRef, {
+          boardId,
+          postId,
+          reportedBy:  AppState.currentUser.uid,
+          reporterHash: AppState.currentHashID,
+          timestamp:   serverTimestamp(),
+          status:      "pending",
+        });
+        UIRenderer.showToast("✓ Reporte enviado. El equipo de moderación lo revisará.", "success");
+      } catch (err) {
+        console.error("[reportPost] Error:", err);
+        UIRenderer.showToast("Error enviando reporte.", "error");
+      }
+    };
+
+    /**
+     * previewPostImage(input) / previewReplyImage(input)
+     * Muestra una preview de la imagen seleccionada antes de subirla.
+     */
+    window.previewPostImage = function(input) {
+      _showImagePreview(input, "post-image-preview");
+    };
+    window.previewReplyImage = function(input) {
+      _showImagePreview(input, "reply-image-preview");
+    };
+    function _showImagePreview(input, previewContainerId) {
+      const container = document.getElementById(previewContainerId);
+      if (!container || !input.files?.[0]) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        container.innerHTML = `
+          <div class="image-preview">
+            <img src="${e.target.result}" alt="Preview" style="max-height:150px; border-radius:4px;" />
+            <button onclick="document.getElementById('${previewContainerId}').innerHTML=''; this.closest('label')?.previousElementSibling?.querySelector('input')?.value=''" class="remove-preview-btn">✕</button>
+          </div>
+        `;
+      };
+      reader.readAsDataURL(input.files[0]);
+    }
+
+    // Limpiar listeners al cerrar la página
+    window.addEventListener("beforeunload", () => {
+      DBEngine.cleanupAllListeners();
+      Ads.destroyAllSlots();
+    });
+
+    // Cerrar modal de thread al hacer click fuera
+    window.addEventListener("click", (e) => {
+      const modal = document.getElementById("thread-modal");
+      if (modal && e.target === modal) {
+        window.closeThread();
+      }
+    });
+
+    // ================================================================
+    // ARRANQUE FINAL — Inicializar autenticación
+    // ================================================================
+    AuthMgr.initialize();
+
+    // Exponer funciones de auth globalmente
+    window.signInWithGoogle = () => AuthMgr.signInWithGoogle();
+    window.signOut          = () => AuthMgr.signOut();
+
+  </script>
+
+  <style>
+    /* ================================================================
+       THEZING — GLOBAL CYBERPUNK STYLESHEET
+       Sistema de diseño: Variables CSS → Tokens → Componentes → Layout
+    ================================================================ */
+
+    /* ── DESIGN TOKENS ── */
+    :root {
+      --bg-void:        #050507;
+      --bg-panel:       #0a0a0f;
+      --bg-card:        #0d0d15;
+      --bg-input:       #111118;
+      --border-dim:     #1a1a28;
+      --border-mid:     #2a2a3a;
+      --text-primary:   #e0e0f0;
+      --text-secondary: #7a7a9a;
+      --text-dim:       #3a3a5a;
+      --active-neon:    #FF00FF;
+      --active-shadow:  0 0 8px #FF00FF, 0 0 20px #FF00FF40;
+      --font-mono:      'Share Tech Mono', monospace;
+      --font-display:   'Orbitron', monospace;
+      --font-body:      'Rajdhani', sans-serif;
+      --radius-sm:      3px;
+      --radius-md:      6px;
+      --transition:     0.18s ease;
+      --scrollbar-w:    6px;
+    }
+
+    /* ── RESET & BASE ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 16px; scroll-behavior: smooth; }
+    body {
+      background: var(--bg-void);
+      color: var(--text-primary);
+      font-family: var(--font-body);
+      font-size: 15px;
+      min-height: 100vh;
+      overflow-x: hidden;
+      /* Scanline effect — sutil para no afectar legibilidad */
+      background-image: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.03) 2px,
+        rgba(0,0,0,0.03) 4px
+      );
+    }
+
+    /* ── SCROLLBAR PERSONALIZADO ── */
+    ::-webkit-scrollbar { width: var(--scrollbar-w); }
+    ::-webkit-scrollbar-track { background: var(--bg-void); }
+    ::-webkit-scrollbar-thumb {
+      background: var(--active-neon, #FF00FF);
+      border-radius: 3px;
+      box-shadow: 0 0 4px var(--active-neon, #FF00FF);
+    }
+
+    /* ── TYPOGRAPHY ── */
+    h1, h2, h3 { font-family: var(--font-display); letter-spacing: 0.05em; }
+    code, .mono { font-family: var(--font-mono); }
+
+    /* ── SCREEN: LOGIN ── */
+    #login-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background:
+        radial-gradient(ellipse 60% 40% at 50% 0%, #FF00FF15 0%, transparent 70%),
+        radial-gradient(ellipse 40% 30% at 80% 100%, #00FFFF10 0%, transparent 70%),
+        var(--bg-void);
+      text-align: center;
+      padding: 2rem;
+    }
+    .login-logo {
+      font-family: var(--font-display);
+      font-size: clamp(2.5rem, 8vw, 5rem);
+      font-weight: 900;
+      letter-spacing: 0.1em;
+      background: linear-gradient(135deg, #FF00FF 0%, #00FFFF 50%, #FF4500 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      filter: drop-shadow(0 0 20px #FF00FF80);
+      animation: logoGlow 3s ease-in-out infinite alternate;
+    }
+    @keyframes logoGlow {
+      from { filter: drop-shadow(0 0 10px #FF00FF80); }
+      to   { filter: drop-shadow(0 0 30px #00FFFF80); }
+    }
+    .login-subtitle {
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+      letter-spacing: 0.2em;
+      margin: 0.5rem 0 2rem;
+      text-transform: uppercase;
+    }
+    .login-desc {
+      color: var(--text-secondary);
+      max-width: 380px;
+      margin-bottom: 2.5rem;
+      font-size: 1rem;
+      line-height: 1.6;
+    }
+    #login-btn {
+      background: transparent;
+      border: 1px solid #FF00FF;
+      color: #FF00FF;
+      font-family: var(--font-display);
+      font-size: 0.85rem;
+      letter-spacing: 0.15em;
+      padding: 14px 36px;
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+      box-shadow: 0 0 12px #FF00FF60, inset 0 0 12px #FF00FF10;
+      transition: all var(--transition);
+      text-transform: uppercase;
+    }
+    #login-btn:hover:not(:disabled) {
+      background: #FF00FF18;
+      box-shadow: 0 0 24px #FF00FF80, inset 0 0 20px #FF00FF20;
+      transform: translateY(-1px);
+    }
+    #login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .login-disclaimer {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      margin-top: 2rem;
+      max-width: 380px;
+      line-height: 1.6;
+    }
+
+    /* ── SCREEN: APP ── */
+    #app-screen {
+      display: none;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    /* ── TOPBAR ── */
+    #topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1rem;
+      height: 52px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border-dim);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 20px rgba(0,0,0,0.5);
+    }
+    .topbar-logo {
+      font-family: var(--font-display);
+      font-size: 1.2rem;
+      font-weight: 900;
+      background: linear-gradient(90deg, #FF00FF, #00FFFF);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: 0.1em;
+    }
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    #user-hash-display {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--active-neon, #FF00FF);
+      background: var(--bg-card);
+      border: 1px solid var(--border-dim);
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+    }
+    .signout-btn {
+      background: transparent;
+      border: 1px solid var(--border-mid);
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      padding: 4px 10px;
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+      transition: all var(--transition);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+    .signout-btn:hover {
+      border-color: #FF4500;
+      color: #FF4500;
+    }
+
+    /* ── BOARD NAVIGATION ── */
+    #board-nav {
+      display: flex;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border-dim);
+      overflow-x: auto;
+      scrollbar-width: thin;
+      -webkit-overflow-scrolling: touch;
+    }
+    .board-nav-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 20px;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.1em;
+      cursor: pointer;
+      transition: all var(--transition);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .board-nav-btn:hover { background: rgba(255,255,255,0.04); }
+    .board-emoji { font-size: 1rem; }
+
+    /* ── MAIN CONTENT LAYOUT ── */
+    #main-content {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      max-width: 800px;
+      margin: 0 auto;
+      width: 100%;
+      padding: 0 0.75rem;
+    }
+
+    /* ── BOARD HEADER ── */
+    #board-header-container {
+      padding: 1rem 0 0.5rem;
+      border-bottom: 1px solid var(--border-dim);
+      margin-bottom: 1rem;
+    }
+    #board-header {
+      font-family: var(--font-display);
+      font-size: 1.4rem;
+      letter-spacing: 0.1em;
+      transition: color var(--transition), text-shadow var(--transition);
+    }
+
+    /* ── NEW POST FORM ── */
+    .new-post-form {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dim);
+      border-radius: var(--radius-md);
+      padding: 1rem;
+      margin-bottom: 1.25rem;
+      transition: border-color var(--transition), box-shadow var(--transition);
+    }
+    .new-post-form:focus-within {
+      border-color: var(--neon-color, #FF00FF);
+      box-shadow: var(--neon-shadow);
+    }
+    .new-post-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+    }
+    .anon-badge {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      border: 1px solid;
+      border-radius: var(--radius-sm);
+      letter-spacing: 0.1em;
+    }
+    .new-post-textarea,
+    .reply-textarea {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border-dim);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: 10px;
+      border-radius: var(--radius-sm);
+      resize: vertical;
+      min-height: 80px;
+      outline: none;
+      transition: border-color var(--transition);
+      line-height: 1.5;
+    }
+    .new-post-textarea:focus,
+    .reply-textarea:focus {
+      border-color: var(--neon-color, #FF00FF);
+    }
+    .new-post-textarea::placeholder,
+    .reply-textarea::placeholder {
+      color: var(--text-dim);
+    }
+    .new-post-footer {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.6rem;
+      flex-wrap: wrap;
+    }
+    .image-upload-label {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      cursor: pointer;
+      padding: 4px 8px;
+      border: 1px solid var(--border-dim);
+      border-radius: var(--radius-sm);
+      transition: border-color var(--transition);
+    }
+    .image-upload-label:hover { border-color: var(--active-neon, #FF00FF); }
+    /* .campus-selector eliminado — v2 red global sin selector de plantel */
+    .char-counter {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      margin-left: auto;
+    }
+    .submit-post-btn,
+    .submit-reply-btn {
+      font-family: var(--font-display);
+      font-size: 0.72rem;
+      letter-spacing: 0.1em;
+      padding: 7px 18px;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all var(--transition);
+      text-transform: uppercase;
+    }
+    .submit-post-btn:hover:not(:disabled),
+    .submit-reply-btn:hover:not(:disabled) {
+      filter: brightness(1.2);
+      transform: translateY(-1px);
+    }
+    .submit-post-btn:disabled,
+    .submit-reply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error-msg { font-family: var(--font-mono); font-size: 0.78rem; margin-top: 0.5rem; min-height: 1.2em; }
+
+    /* ── POST CARDS ── */
+    .post-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dim);
+      border-radius: var(--radius-md);
+      padding: 0.9rem;
+      margin-bottom: 0.75rem;
+      transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+      position: relative;
+    }
+    .post-card::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 2px;
+      background: var(--neon-color, #FF00FF);
+      border-radius: 2px 0 0 2px;
+      opacity: 0.6;
+      transition: opacity var(--transition);
+    }
+    .post-card:hover {
+      border-color: var(--neon-color, #FF00FF);
+      box-shadow: var(--neon-shadow);
+      transform: translateX(2px);
+    }
+    .post-card:hover::before { opacity: 1; }
+    .post-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .post-hash-id {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: bold;
+    }
+    .post-campus {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+    }
+    .post-time {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-dim);
+    }
+    .post-id-small {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      color: var(--text-dim);
+      margin-left: auto;
+    }
+    .post-content {
+      font-size: 0.95rem;
+      line-height: 1.65;
+      color: var(--text-primary);
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    .post-link { color: var(--active-neon, #00FFFF); }
+    .post-image-container { margin-top: 0.6rem; }
+    .post-image {
+      max-width: 100%;
+      max-height: 300px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-dim);
+      transition: opacity 0.3s ease;
+    }
+    .post-image.loaded { opacity: 1; }
+    .post-image:not(.loaded) { opacity: 0.3; background: var(--bg-input); min-height: 80px; }
+    .post-footer {
+      display: flex;
+      gap: 1rem;
+      margin-top: 0.6rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid var(--border-dim);
+    }
+    .reply-btn, .report-btn {
+      background: transparent;
+      border: none;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      cursor: pointer;
+      padding: 2px 0;
+      transition: opacity var(--transition);
+      letter-spacing: 0.05em;
+    }
+    .reply-btn:hover { opacity: 0.7; }
+    .report-btn { color: var(--text-dim); }
+    .report-btn:hover { color: #FF4500; }
+
+    /* ── AD CONTAINERS ── */
+    .ad-infeed-container {
+      margin: 0.75rem 0;
+      background: var(--bg-panel);
+      border: 1px dashed var(--border-dim);
+      border-radius: var(--radius-sm);
+      padding: 0.5rem;
+      text-align: center;
+      min-height: 90px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .ad-label {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      color: var(--text-dim);
+      letter-spacing: 0.15em;
+      margin-bottom: 0.3rem;
+    }
+    #ad-sticky-footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 500;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border-dim);
+      display: flex;
+      justify-content: center;
+      padding: 4px;
+      min-height: 60px;
+    }
+    @media (min-width: 768px) { #ad-sticky-footer { display: none; } } /* Solo mobile */
+
+    /* ── THREAD MODAL ── */
+    #thread-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      z-index: 1000;
+      align-items: flex-start;
+      justify-content: center;
+      overflow-y: auto;
+      padding: 1rem;
+      backdrop-filter: blur(4px);
+    }
+    .thread-container {
+      background: var(--bg-panel);
+      border: 1px solid var(--neon-color, #FF00FF);
+      border-radius: var(--radius-md);
+      width: 100%;
+      max-width: 700px;
+      box-shadow: 0 0 30px var(--neon-color, #FF00FF);
+      animation: modalIn 0.2s ease;
+    }
+    @keyframes modalIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .thread-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border-dim);
+    }
+    .thread-header h2 { font-size: 1rem; letter-spacing: 0.1em; }
+    .close-thread-btn {
+      background: transparent;
+      border: 1px solid var(--border-mid);
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      padding: 4px 10px;
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+      transition: all var(--transition);
+      letter-spacing: 0.1em;
+    }
+    .close-thread-btn:hover { border-color: #FF4500; color: #FF4500; }
+    .thread-op { padding: 1rem; border-bottom: 1px solid var(--border-dim); }
+    .reply-form-container {
+      padding: 1rem;
+      border-bottom: 2px solid;
+    }
+    .reply-form-container h3 { font-size: 0.85rem; margin-bottom: 0.6rem; }
+    .reply-form-footer {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .replies-list { padding: 0.75rem 1rem; }
+    .reply-card {
+      background: var(--bg-card);
+      border-left: 2px solid var(--neon-color, #FF00FF);
+      padding: 0.5rem 0.75rem;
+      margin-bottom: 0.5rem;
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    }
+    .reply-meta { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.3rem; }
+    .reply-hash { font-family: var(--font-mono); font-size: 0.78rem; font-weight: bold; }
+    .reply-time { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-dim); }
+    .reply-content { font-size: 0.9rem; line-height: 1.55; word-break: break-word; white-space: pre-wrap; }
+    .reply-image { max-width: 100%; max-height: 200px; margin-top: 0.4rem; border-radius: var(--radius-sm); }
+    .no-replies { font-family: var(--font-mono); font-size: 0.78rem; text-align: center; padding: 1rem 0; }
+    .thread-loading {
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      padding: 2rem;
+      animation: pulse 1s ease-in-out infinite alternate;
+    }
+    @keyframes pulse { from { opacity: 0.4; } to { opacity: 1; } }
+
+    /* ── SKELETON LOADER ── */
+    .post-skeleton {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dim);
+      border-radius: var(--radius-md);
+      padding: 0.9rem;
+      margin-bottom: 0.75rem;
+    }
+    .skeleton-line {
+      height: 12px;
+      background: linear-gradient(90deg, var(--bg-input) 25%, var(--border-dim) 50%, var(--bg-input) 75%);
+      background-size: 200% 100%;
+      border-radius: 6px;
+      margin-bottom: 0.5rem;
+      animation: shimmer 1.5s infinite;
+    }
+    .skeleton-line.short  { width: 30%; }
+    .skeleton-line.medium { width: 60%; }
+    .skeleton-line.long   { width: 90%; }
+    @keyframes shimmer { to { background-position: -200% center; } }
+
+    /* ── EMPTY STATE ── */
+    .empty-board {
+      text-align: center;
+      padding: 3rem 1rem;
+      font-family: var(--font-mono);
+    }
+    .empty-icon { font-size: 3rem; margin-bottom: 1rem; opacity: 0.5; }
+    .empty-board p { font-size: 0.82rem; margin-bottom: 0.3rem; }
+
+    /* ── ERROR STATE ── */
+    .error-state {
+      text-align: center;
+      padding: 2rem;
+      font-family: var(--font-mono);
+      color: #FF4444;
+    }
+    .error-state button {
+      margin-top: 1rem;
+      background: transparent;
+      border: 1px solid #FF4444;
+      color: #FF4444;
+      padding: 6px 16px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      border-radius: var(--radius-sm);
+    }
+
+    /* ── TOAST ANIMATIONS ── */
+    @keyframes toastIn  { from { opacity: 0; transform: translateX(-50%) translateY(10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+    @keyframes toastOut { to   { opacity: 0; transform: translateX(-50%) translateY(10px); } }
+
+    /* ── IMAGE PREVIEW ── */
+    .image-preview-container { margin-top: 0.5rem; }
+    .image-preview {
+      position: relative;
+      display: inline-block;
+    }
+    .remove-preview-btn {
+      position: absolute;
+      top: 4px; right: 4px;
+      background: rgba(0,0,0,0.7);
+      border: 1px solid #FF4500;
+      color: #FF4500;
+      width: 20px; height: 20px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 0.65rem;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0;
+    }
+
+    /* ── GLOW CLASSES (para todas las secciones) ── */
+    .glow-magenta:hover { --neon-color: #FF00FF; --neon-shadow: 0 0 8px #FF00FF, 0 0 20px #FF00FF40; }
+    .glow-cyan:hover    { --neon-color: #00FFFF; --neon-shadow: 0 0 8px #00FFFF, 0 0 20px #00FFFF40; }
+    .glow-gold:hover    { --neon-color: #FFD700; --neon-shadow: 0 0 8px #FFD700, 0 0 20px #FFD70040; }
+    .glow-orange:hover  { --neon-color: #FF4500; --neon-shadow: 0 0 8px #FF4500, 0 0 20px #FF450040; }
+    .glow-green:hover   { --neon-color: #00FF41; --neon-shadow: 0 0 8px #00FF41, 0 0 20px #00FF4140; }
+    .glow-violet:hover  { --neon-color: #BF00FF; --neon-shadow: 0 0 8px #BF00FF, 0 0 20px #BF00FF40; }
+
+    /* ── PADDING BOTTOM (para el sticky ad en mobile) ── */
+    @media (max-width: 767px) { #main-content { padding-bottom: 70px; } }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 480px) {
+      .topbar-logo { font-size: 1rem; }
+      #user-hash-display { font-size: 0.7rem; }
+      .new-post-footer { flex-wrap: wrap; }
+      /* .campus-selector eliminado — v2 */
+      .post-id-small { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ================================================================
+       PANTALLA DE LOGIN
+  ================================================================ -->
+  <div id="login-screen">
+    <div class="login-logo">TheZing</div>
+    <div class="login-subtitle">// CECyTEC Network — Sistema Coahuila</div>
+    <p class="login-desc">
+      La red anónima estudiantil del sistema CECyTEC.<br />
+      Tu identidad es tuya. Tu voz, de todos.
+    </p>
+    <button id="login-btn" onclick="window.signInWithGoogle()">
+      Entrar con Google
+    </button>
+    <p class="login-disclaimer">
+      Al ingresar con tu cuenta Google institucional (@cecytec.edu.mx) aceptas los
+      Términos de Uso de TheZing. Tu email permanece privado — se te asigna un ID
+      anónimo para todas tus publicaciones. El sistema registra metadatos de
+      moderación según el Aviso de Privacidad del sistema CECyTEC Coahuila.
+    </p>
+  </div>
+
+  <!-- ================================================================
+       PANTALLA PRINCIPAL DE LA APP
+  ================================================================ -->
+  <div id="app-screen">
+
+    <!-- TOPBAR -->
+    <nav id="topbar" role="navigation" aria-label="Barra principal">
+      <div class="topbar-logo">TheZing</div>
+      <div class="topbar-right">
+        <span id="user-hash-display" title="Tu ID anónimo">#??????</span>
+        <button class="signout-btn" onclick="window.signOut()" aria-label="Cerrar sesión">
+          Salir
+        </button>
+      </div>
+    </nav>
+
+    <!-- BOARD NAVIGATION -->
+    <nav id="board-nav" role="navigation" aria-label="Tablones">
+      <!-- Renderizado dinámicamente por UIRenderer.renderBoardNav() -->
+    </nav>
+
+    <!-- MAIN CONTENT -->
+    <main id="main-content" role="main">
+
+      <!-- Board Header -->
+      <div id="board-header-container">
+        <h1 id="board-header">/cargando/</h1>
+      </div>
+
+      <!-- Formulario de nuevo post -->
+      <div id="new-post-form-container">
+        <!-- Renderizado por UIRenderer.renderNewPostForm() -->
+      </div>
+
+      <!-- Feed de posts (actualizado en tiempo real por onSnapshot) -->
+      <section id="board-feed" aria-label="Posts del tablón" aria-live="polite">
+        <!-- Posts renderizados dinámicamente -->
+      </section>
+
+      <!-- Sentinel para scroll infinito (futuro) -->
+      <div id="infinite-scroll-sentinel" style="height:1px;"></div>
+
+    </main>
+
+    <!-- STICKY AD — Solo mobile, actualiza cada 60s -->
+    <div id="ad-sticky-footer" role="complementary" aria-label="Publicidad">
+      <!-- Slot definido y manejado por AdManager._defineStickySlot() -->
+    </div>
+
+  </div>
+
+  <!-- ================================================================
+       THREAD MODAL — Se activa al hacer click en "respuestas"
+  ================================================================ -->
+  <div id="thread-modal" role="dialog" aria-modal="true" aria-label="Hilo de respuestas">
+    <!-- Contenido renderizado dinámicamente por UIRenderer.renderThread() -->
+  </div>
+
+  <!-- ================================================================
+       NOSCRIPT FALLBACK
+  ================================================================ -->
+  <noscript>
+    <div style="color:#FF00FF;font-family:monospace;padding:2rem;background:#050507;text-align:center;min-height:100vh;display:flex;align-items:center;justify-content:center;">
+      <div>
+        <h1 style="font-size:2rem;margin-bottom:1rem;">TheZing requiere JavaScript</h1>
+        <p>Habilita JavaScript en tu navegador para acceder a la plataforma.</p>
+      </div>
+    </div>
+  </noscript>
+
+</body>
+</html>
